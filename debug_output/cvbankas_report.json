@@ -1,0 +1,13 @@
+{
+  "source": "cvbankas",
+  "url": "https://ru.cvbankas.lt/",
+  "title": "Новейшие объявления о работе | CVbankas.lt",
+  "selectors": {
+    "items": "div#js_id_id_job_ad_list article.list_article",
+    "title": "h3.list_h3",
+    "company": "span.heading_secondary",
+    "location": "span.list_city",
+    "salary": "span.salary_amount",
+    "link": "a.list_a"
+  }
+}

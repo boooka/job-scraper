@@ -1,0 +1,70 @@
+services:
+  # ── PostgreSQL ────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: job_scraper_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: job_scraper
+      POSTGRES_USER: scraper
+      POSTGRES_PASSWORD: scraper_pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scraper -d job_scraper"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Migrations (run once, then exit) ──────────────────────────────────
+  migrate:
+    build: .
+    container_name: job_scraper_migrate
+    command: ["sh", "-c", "alembic upgrade head"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://scraper:scraper_pass@postgres:5432/job_scraper
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # ── Scraper scheduler ─────────────────────────────────────────────────
+  scraper:
+    build: .
+    container_name: job_scraper_app
+    restart: unless-stopped
+    command: ["python", "-m", "src.main", "scheduler"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://scraper:scraper_pass@postgres:5432/job_scraper
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - /dev/shm:/dev/shm  # required for Chromium
+    shm_size: "256m"
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+
+  # ── pgAdmin (optional, dev only) ─────────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: job_scraper_pgadmin
+    profiles: ["dev"]
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@local.dev
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data:

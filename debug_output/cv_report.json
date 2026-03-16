@@ -1,0 +1,15 @@
+{
+  "source": "cv",
+  "url": "https://www.cv.lt/jobs",
+  "title": "Nuolatinio darbo skelbimai – siūlo darbą | cv.lt",
+  "selectors": {
+    "items": "//article[@data-component='jobad']",
+    "title": "h2.job-title",
+    "company": "div.job-company",
+    "location": "span.job-location",
+    "salary": "span[data-component='badge']",
+    "tax": ".main-info",
+    "link": "a.block h2.job-title",
+    "href": "a.block h2.job-title"
+  }
+}

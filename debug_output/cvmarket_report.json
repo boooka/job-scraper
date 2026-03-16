@@ -1,0 +1,12 @@
+{
+  "source": "cvmarket",
+  "url": "https://www.cvmarket.lt/darbo-skelbimai?start=50",
+  "title": "Darbo skelbimai - 100+ naujų darbo pasiūlymų kasdien - CV Market",
+  "selectors": {
+    "items": "article[data-component='jobad']",
+    "title": "div.main-info h2",
+    "company": "span.job-company",
+    "salary": "div.salary-block",
+    "link": "a[href]"
+  }
+}

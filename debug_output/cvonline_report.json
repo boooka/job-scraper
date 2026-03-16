@@ -1,0 +1,13 @@
+{
+  "source": "cvonline",
+  "url": "https://cvonline.lt/ru/search?limit=20&offset=0",
+  "title": "Поиск вакансий | CV-Online",
+  "selectors": {
+    "items": "ul.vacancies-list, .vacancy-item",
+    "company": "div.vacancy-item__column",
+    "title": "h2.vacancy-item__title",
+    "location": "div.vacancy-item__locations",
+    "salary": "span.salary-label",
+    "link": "h2.vacancy-item__title"
+  }
+}

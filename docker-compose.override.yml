@@ -1,0 +1,28 @@
+# Overrides for local development — hot-reload source, debug logging
+services:
+  scraper:
+    command: ["python", "-m", "src.main", "scrape", "all"]
+    volumes:
+      - .:/app          # mount source for live reload
+      - /dev/shm:/dev/shm
+    environment:
+      DATABASE_URL: postgresql+asyncpg://scraper:scraper_pass@postgres:5432/job_scraper
+      SCRAPER_HEADLESS: "true"
+      LOG_LEVEL: DEBUG
+      LOG_FORMAT: console
+    restart: "no"       # don't loop in dev
+
+  debug:
+    build: .
+    profiles: ["debug"]
+    command: ["python", "scripts/debug_selectors.py"]
+    environment:
+      SOURCE: "cv"        
+      # SOURCE: "cvonline"
+      # SOURCE: "newsite"
+      # SELECTOR: "div.job-card h2"   # опционально      
+    volumes:
+      - ./scripts:/app/scripts      # живой код — правишь локально, сразу в контейнере
+      - ./debug_output:/app/debug_output  # результаты сразу на хосте
+    depends_on:
+      - postgres
