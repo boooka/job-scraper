@@ -31,6 +31,13 @@ class TelegramMessages:
     ADMIN_ONLY = "Команда доступна только администраторам."
     UNKNOWN_COMMAND = "Неизвестная команда. Используйте /help."
     COMMAND_ERROR = "Ошибка при обработке команды."
+    ASK_CONTEXT_QUERY = "Введите поисковый запрос (или фразу)."
+    ASK_CONTEXT_LOCATION_CUSTOM = "Введите местоположение текстом."
+    ASK_CONTEXT_SALARY_FROM = "Введите зарплату ОТ (число)."
+    ASK_CONTEXT_SALARY_TO = "Введите зарплату ДО (число)."
+    ASK_CONTEXT_SALARY_RANGE = "Введите диапазон в формате: <от> <до>"
+    CONTEXT_RESET = "Контекст поиска очищен."
+    CONTEXT_EMPTY = "Контекст пуст."
 
     @staticmethod
     def subscription_created(sub_id: int) -> str:
@@ -47,4 +54,38 @@ class TelegramMessages:
     @staticmethod
     def admin_subscriptions(lines: list[str]) -> str:
         return "Все активные подписки:\n" + "\n".join(lines)
+
+    @staticmethod
+    def search_many_found(total: int, next_count: int) -> str:
+        return (
+            f"Найдено {total} объявлений, вывести все или следующие {next_count} "
+            "объявлений из результата поиска?"
+        )
+
+    @staticmethod
+    def search_remaining(remaining: int, next_count: int) -> str:
+        return (
+            f"Осталось {remaining} объявлений, вывести все или следующие {next_count} "
+            "объявлений?"
+        )
+
+    @staticmethod
+    def context_summary(
+        *,
+        query: str | None,
+        location: str | None,
+        salary_from: int | None,
+        salary_to: int | None,
+        date_days: int | None,
+        auto_search: bool,
+    ) -> str:
+        return (
+            "Текущий контекст поиска:\n"
+            f"- запрос: {query or '-'}\n"
+            f"- локация: {location or '-'}\n"
+            f"- дата: {f'последние {date_days} дн.' if date_days else '-'}\n"
+            f"- зарплата от: {salary_from if salary_from is not None else '-'}\n"
+            f"- зарплата до: {salary_to if salary_to is not None else '-'}\n"
+            f"- автопоиск: {'вкл' if auto_search else 'выкл'}"
+        )
 

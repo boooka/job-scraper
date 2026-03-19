@@ -12,3 +12,8 @@ dist/
 *.egg-info/
 debug_output/
 remote.conf
+*.log
+logs/
+backups/
+data/
+

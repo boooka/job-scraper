@@ -45,6 +45,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - /dev/shm:/dev/shm  # required for Chromium
+      - ./logs:/app/logs
     shm_size: "512m"
     deploy:
       resources:
@@ -60,6 +61,8 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://scraper:scraper_pass@postgres:5432/job_scraper
+    volumes:
+      - ./logs:/app/logs
     depends_on:
       migrate:
         condition: service_completed_successfully

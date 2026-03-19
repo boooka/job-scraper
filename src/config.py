@@ -53,11 +53,21 @@ class Settings(BaseSettings):
     telegram_regex_max_length: int = Field(default=120)
     telegram_regex_max_groups: int = Field(default=10)
     telegram_regex_max_alternations: int = Field(default=12)
+    telegram_search_show_all_threshold: int = Field(default=3)
+    telegram_search_next_batch_size: int = Field(default=5)
     metrics_top_search_queries: int = Field(default=10)
+    metrics_dump_path: str = Field(default="logs/metrics/metrics.jsonl")
+    metrics_dump_interval_seconds: int = Field(default=300)
+
+    # Telegram debug/audit logging
+    telegram_debug_logging: bool = Field(default=True)
+    telegram_debug_log_path: str = Field(default="logs/telegram/debug.log")
  
     # Logging
     log_level: str = Field(default="INFO")
     log_format: str = Field(default="json")
+    app_log_path: str = Field(default="logs/app/app.log")
+    scraper_log_path: str = Field(default="logs/scraper/scraper.log")
  
  
 settings = Settings()

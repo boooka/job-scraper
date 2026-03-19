@@ -5,6 +5,7 @@ import asyncio
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from src.config import settings
 from src.logger import get_logger
@@ -14,6 +15,7 @@ from src.scrapers.cvonline import CVOnlineScraper
 from src.scrapers.cv import CVScraper   
 
 from src.services.scrape_service import run_scrape
+from src.services.metrics_exporter import dump_metrics_to_disk
 from src.services.subscription_notifier import run_subscription_notifications
 from src.services.translation_service import run_pending_translations
 
@@ -75,7 +77,7 @@ def create_scheduler() -> AsyncIOScheduler:
         misfire_grace_time=300,
     )
 
-        # Translation catch-up job — handles any vacancies missed by real-time trigger
+    # Translation catch-up job — handles any vacancies missed by real-time trigger
     # (e.g. if DeepL was unavailable during scrape)
     if settings.deepl_api_key:
         scheduler.add_job(
@@ -96,6 +98,15 @@ def create_scheduler() -> AsyncIOScheduler:
             max_instances=1,
             misfire_grace_time=300,
         )
+
+    scheduler.add_job(
+        dump_metrics_to_disk,
+        trigger=IntervalTrigger(seconds=settings.metrics_dump_interval_seconds),
+        id="metrics_dump",
+        name="Metrics dump to disk",
+        max_instances=1,
+        misfire_grace_time=120,
+    )
 
 
     return scheduler

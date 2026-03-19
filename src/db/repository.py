@@ -16,6 +16,7 @@ from src.models.orm import (
     ScrapeRun,
     TelegramSubscription,
     TelegramSubscriptionDelivery,
+    TelegramUser,
     TranslationCache,
     Vacancy,
     VacancyChange,
@@ -401,6 +402,81 @@ class TelegramSubscriptionRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def cancel_for_user(self, subscription_id: int, telegram_user_id: int) -> bool:
+        stmt = select(TelegramSubscription).where(
+            TelegramSubscription.id == subscription_id,
+            TelegramSubscription.telegram_user_id == telegram_user_id,
+            TelegramSubscription.is_active.is_(True),
+        )
+        result = await self._session.execute(stmt)
+        sub = result.scalar_one_or_none()
+        if sub is None:
+            return False
+        sub.is_active = False
+        sub.cancelled_at = datetime.now(timezone.utc)
+        self._session.add(sub)
+        return True
+
+    async def list_all_active(self) -> list[TelegramSubscription]:
+        stmt = (
+            select(TelegramSubscription)
+            .where(TelegramSubscription.is_active.is_(True))
+            .order_by(TelegramSubscription.created_at.desc())
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+
+class TelegramUserRepository:
+    """Store telegram users who interacted with the bot."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def upsert_user(
+        self,
+        *,
+        telegram_user_id: int,
+        username: str | None,
+        first_name: str | None,
+        last_name: str | None,
+        language_code: str | None,
+        is_bot: bool,
+        is_premium: bool | None,
+        last_chat_id: int | None,
+    ) -> TelegramUser:
+        stmt = select(TelegramUser).where(TelegramUser.telegram_user_id == telegram_user_id)
+        result = await self._session.execute(stmt)
+        user = result.scalar_one_or_none()
+        now = datetime.now(timezone.utc)
+        if user is None:
+            user = TelegramUser(
+                telegram_user_id=telegram_user_id,
+                username=username,
+                first_name=first_name,
+                last_name=last_name,
+                language_code=language_code,
+                is_bot=is_bot,
+                is_premium=is_premium,
+                last_chat_id=last_chat_id,
+                last_seen_at=now,
+            )
+            self._session.add(user)
+            await self._session.flush()
+            return user
+
+        user.username = username
+        user.first_name = first_name
+        user.last_name = last_name
+        user.language_code = language_code
+        user.is_bot = is_bot
+        user.is_premium = is_premium
+        user.last_chat_id = last_chat_id
+        user.last_seen_at = now
+        self._session.add(user)
+        await self._session.flush()
+        return user
+
 
 class TelegramDeliveryRepository:
     """Track already delivered vacancies per subscription."""
@@ -426,31 +502,6 @@ class TelegramDeliveryRepository:
             )
         )
         await self._session.flush()
-
-    async def cancel_for_user(self, subscription_id: int, telegram_user_id: int) -> bool:
-        stmt = select(TelegramSubscription).where(
-            TelegramSubscription.id == subscription_id,
-            TelegramSubscription.telegram_user_id == telegram_user_id,
-            TelegramSubscription.is_active.is_(True),
-        )
-        result = await self._session.execute(stmt)
-        sub = result.scalar_one_or_none()
-        if sub is None:
-            return False
-        sub.is_active = False
-        sub.cancelled_at = datetime.now(timezone.utc)
-        self._session.add(sub)
-        return True
-
-    async def list_all_active(self) -> list[TelegramSubscription]:
-        stmt = (
-            select(TelegramSubscription)
-            .where(TelegramSubscription.is_active.is_(True))
-            .order_by(TelegramSubscription.created_at.desc())
-        )
-        result = await self._session.execute(stmt)
-        return list(result.scalars().all())
-
 
 class VacancySearchRepository:
     """Vacancy search with include/exclude/fuzzy and admin regex support."""
@@ -478,6 +529,11 @@ class VacancySearchRepository:
         language: str,
         limit: int,
         is_admin: bool,
+        location: str | None = None,
+        published_from: datetime | None = None,
+        published_to: datetime | None = None,
+        salary_from: int | None = None,
+        salary_to: int | None = None,
     ) -> Sequence[Vacancy]:
         dialect = self._session.bind.dialect.name if self._session.bind is not None else "postgresql"
 
@@ -489,25 +545,42 @@ class VacancySearchRepository:
                 regex=regex,
                 limit=limit,
                 is_admin=is_admin,
+                location=location,
+                published_from=published_from,
+                published_to=published_to,
+                salary_from=salary_from,
+                salary_to=salary_to,
             )
 
-        translated_text = func.coalesce(
-            func.string_agg(
-                func.concat(
-                    func.coalesce(VacancyTranslation.title_translated, ""),
-                    literal(" "),
-                    self._clean_plain_text_sql(VacancyTranslation.description_translated),
-                ),
-                literal(" "),
-            ),
-            "",
+        translations_subq = (
+            select(
+                VacancyTranslation.vacancy_id.label("vacancy_id"),
+                func.coalesce(
+                    func.string_agg(
+                        func.concat(
+                            func.coalesce(VacancyTranslation.title_translated, ""),
+                            literal(" "),
+                            self._clean_plain_text_sql(VacancyTranslation.description_translated),
+                        ),
+                        literal(" "),
+                    ),
+                    "",
+                ).label("translated_text"),
+            )
+            .group_by(VacancyTranslation.vacancy_id)
+            .subquery()
         )
+
         original_text = func.concat(
             func.coalesce(Vacancy.title, ""),
             literal(" "),
             self._clean_plain_text_sql(Vacancy.description),
         )
-        searchable_text = func.concat(original_text, literal(" "), translated_text)
+        searchable_text = func.concat(
+            original_text,
+            literal(" "),
+            func.coalesce(translations_subq.c.translated_text, ""),
+        )
 
         rank_expr = func.ts_rank_cd(
             func.to_tsvector("simple", searchable_text),
@@ -516,9 +589,8 @@ class VacancySearchRepository:
 
         stmt = (
             select(Vacancy, rank_expr.label("rank"))
-            .outerjoin(VacancyTranslation, VacancyTranslation.vacancy_id == Vacancy.id)
+            .outerjoin(translations_subq, translations_subq.c.vacancy_id == Vacancy.id)
             .where(Vacancy.is_active.is_(True))
-            .group_by(Vacancy.id)
         )
 
         include_conditions = [
@@ -553,6 +625,21 @@ class VacancySearchRepository:
                 searchable_text.op("~*")(regex)
             )
 
+        if location and location.strip():
+            stmt = stmt.where(func.coalesce(Vacancy.location, "").ilike(f"%{location.strip()}%"))
+
+        if published_from is not None:
+            stmt = stmt.where(Vacancy.first_seen_at >= published_from)
+        if published_to is not None:
+            stmt = stmt.where(Vacancy.first_seen_at <= published_to)
+
+        if salary_from is not None:
+            upper_salary = func.coalesce(Vacancy.salary_max, Vacancy.salary_min, 0)
+            stmt = stmt.where(upper_salary >= salary_from)
+        if salary_to is not None:
+            lower_salary = func.coalesce(Vacancy.salary_min, Vacancy.salary_max, 10**9)
+            stmt = stmt.where(lower_salary <= salary_to)
+
         stmt = stmt.order_by(rank_expr.desc(), Vacancy.first_seen_at.desc()).limit(limit)
         result = await self._session.execute(stmt)
         return [row[0] for row in result.all()]
@@ -566,6 +653,11 @@ class VacancySearchRepository:
         regex: str | None,
         limit: int,
         is_admin: bool,
+        location: str | None = None,
+        published_from: datetime | None = None,
+        published_to: datetime | None = None,
+        salary_from: int | None = None,
+        salary_to: int | None = None,
     ) -> Sequence[Vacancy]:
         translated_text = (
             func.coalesce(VacancyTranslation.title_translated, "")
@@ -600,9 +692,51 @@ class VacancySearchRepository:
         if regex and is_admin:
             # Regex operator differs per dialect; fallback keeps deterministic behavior.
             stmt = stmt.where(searchable_text.ilike(f"%{regex}%"))
+        if location and location.strip():
+            stmt = stmt.where(func.coalesce(Vacancy.location, "").ilike(f"%{location.strip()}%"))
+        if published_from is not None:
+            stmt = stmt.where(Vacancy.first_seen_at >= published_from)
+        if published_to is not None:
+            stmt = stmt.where(Vacancy.first_seen_at <= published_to)
+        if salary_from is not None:
+            upper_salary = func.coalesce(Vacancy.salary_max, Vacancy.salary_min, 0)
+            stmt = stmt.where(upper_salary >= salary_from)
+        if salary_to is not None:
+            lower_salary = func.coalesce(Vacancy.salary_min, Vacancy.salary_max, 10**9)
+            stmt = stmt.where(lower_salary <= salary_to)
 
         result = await self._session.execute(stmt)
         return result.scalars().all()
+
+    async def list_top_locations(self, *, limit: int = 8) -> list[str]:
+        stmt = (
+            select(Vacancy.location)
+            .where(
+                Vacancy.is_active.is_(True),
+                Vacancy.location.is_not(None),
+                func.length(func.trim(Vacancy.location)) > 0,
+            )
+            .group_by(Vacancy.location)
+            .order_by(func.count(Vacancy.id).desc())
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        return [row[0] for row in result.all() if row[0]]
+
+    async def list_salary_suggestions(self, *, limit: int = 8) -> list[int]:
+        anchor = func.coalesce(Vacancy.salary_min, Vacancy.salary_max)
+        stmt = (
+            select(anchor)
+            .where(
+                Vacancy.is_active.is_(True),
+                anchor.is_not(None),
+            )
+            .group_by(anchor)
+            .order_by(func.count(Vacancy.id).desc())
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        return [int(row[0]) for row in result.all() if row[0] is not None]
 
 
 class ScrapeRunRepository:

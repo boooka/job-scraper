@@ -62,8 +62,8 @@ case "$cmd" in
       --exclude='deploy/remote.conf.local' \
       "$PROJECT_ROOT/" \
       "$REMOTE:$REMOTE_DIR/"
-    info "Перезапуск бота на сервере..."
-    ssh_cmd "cd $REMOTE_DIR && docker compose up -d --build"
+    info "Перезапуск сервисов на сервере (с автобэкапом перед миграциями)..."
+    ssh_cmd "cd $REMOTE_DIR && ./deploy/deploy-local.sh update"
     info "Готово."
     ;;
   setup)
@@ -93,6 +93,19 @@ case "$cmd" in
   status)
     ssh_cmd "cd $REMOTE_DIR && ./deploy/deploy-local.sh status"
     ;;
+  backup)
+    info "Запускаю бэкап на сервере..."
+    ssh_cmd "cd $REMOTE_DIR && ./deploy/deploy-local.sh backup"
+    mkdir -p "$LOCAL_DIR/backups"
+    latest_file="$(ssh_cmd "ls -1t $REMOTE_DIR/backups/job-scraper-*.sql.gz 2>/dev/null | head -n 1 | xargs -n1 basename" || true)"
+    if [ -n "${latest_file:-}" ]; then
+      info "Скачиваю последний бэкап: $latest_file"
+      scp_cmd "$latest_file"
+      info "Бэкап сохранен локально в $LOCAL_DIR/backups/$latest_file"
+    else
+      warn "На сервере не найден SQL-бэкап для скачивания."
+    fi
+    ;;
   ssh)
     ssh_cmd "cd $REMOTE_DIR && exec \$SHELL"
     ;;
@@ -100,13 +113,14 @@ case "$cmd" in
     echo ""
     echo "Деплой на $REMOTE (порт ${REMOTE_PORT:-22})"
     echo ""
-    echo "  push    — rsync кода на сервер + docker compose up -d --build"
+    echo "  push    — rsync кода на сервер + ./deploy/deploy-local.sh update"
     echo "  setup   — создать каталог, первый rsync, .env из example"
     echo "  start   — на сервере: ./deploy.sh start"
     echo "  stop    — на сервере: ./deploy.sh stop"
     echo "  restart — на сервере: ./deploy.sh restart"
     echo "  logs    — логи контейнера с сервера"
     echo "  status  — статус контейнера на сервере"
+    echo "  backup  — бэкап БД на сервере + скачать последний локально"
     echo "  ssh     — войти по SSH в каталог проекта на сервере"
     echo ""
     ;;

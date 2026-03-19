@@ -1,8 +1,18 @@
 """Structured logging configuration."""
+from __future__ import annotations
+
 import logging
+from pathlib import Path
 import sys
+
 import structlog
+
 from src.config import settings
+
+
+class _ScraperOnlyFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.name.startswith("src.scrapers")
 
 
 def configure_logging() -> None:
@@ -37,11 +47,29 @@ def configure_logging() -> None:
         processors=[structlog.stdlib.ProcessorFormatter.remove_processors_meta, renderer],
     )
 
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(formatter)
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setFormatter(formatter)
 
     root_logger = logging.getLogger()
-    root_logger.addHandler(handler)
+    # Avoid duplicate handlers in long-lived processes/tests.
+    root_logger.handlers.clear()
+    root_logger.addHandler(stdout_handler)
+
+    # Persist all app logs to disk.
+    app_log_path = Path(settings.app_log_path)
+    app_log_path.parent.mkdir(parents=True, exist_ok=True)
+    app_file_handler = logging.FileHandler(app_log_path, encoding="utf-8")
+    app_file_handler.setFormatter(formatter)
+    root_logger.addHandler(app_file_handler)
+
+    # Persist scraper-only logs separately for troubleshooting.
+    scraper_log_path = Path(settings.scraper_log_path)
+    scraper_log_path.parent.mkdir(parents=True, exist_ok=True)
+    scraper_file_handler = logging.FileHandler(scraper_log_path, encoding="utf-8")
+    scraper_file_handler.setFormatter(formatter)
+    scraper_file_handler.addFilter(_ScraperOnlyFilter())
+    root_logger.addHandler(scraper_file_handler)
+
     root_logger.setLevel(log_level)
 
 

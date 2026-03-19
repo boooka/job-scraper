@@ -1,75 +1,123 @@
-"""Telegram bot for vacancy search and subscription management."""
+"""Telegram bot implemented with aiogram."""
 from __future__ import annotations
 
-import asyncio
-import random
+import json
+import logging
 import re
 import time
-from typing import Any
+import traceback
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Awaitable, Callable
 
-import httpx
+from aiogram import BaseMiddleware, Bot, Dispatcher, Router
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import Command
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+    TelegramObject,
+    User,
+)
 
 from src.config import settings
 from src.db.engine import get_session
-from src.db.repository import TelegramSubscriptionRepository, VacancySearchRepository
+from src.db.repository import (
+    TelegramSubscriptionRepository,
+    TelegramUserRepository,
+    VacancySearchRepository,
+)
 from src.logger import get_logger
 from src.services.metrics import metrics_registry
-from src.services.telegram_messages import TelegramMessages
 from src.services.search_query import parse_search_query
 from src.services.subscription_notifier import get_last_notification_stats
+from src.services.telegram_messages import TelegramMessages
 
 log = get_logger(__name__)
-RETRYABLE_HTTP_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
+
+
+class TelegramDebugMiddleware(BaseMiddleware):
+    def __init__(self, debug_cb: Callable[[str, dict[str, Any]], None]) -> None:
+        super().__init__()
+        self._debug = debug_cb
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        self._debug("telegram.update", {"event": event.model_dump(mode="json", exclude_none=True)})
+        try:
+            return await handler(event, data)
+        except Exception as exc:
+            self._debug(
+                "telegram.handler_error",
+                {"error": str(exc), "traceback": traceback.format_exc()},
+            )
+            raise
 
 
 class TelegramBotService:
+    BTN_SEARCH = "🔎 Поиск вакансий"
+    BTN_CONTEXT_SEARCH = "🧩 Контекстный поиск"
+    BTN_SUBSCRIBE = "⭐ Подписаться на поиск"
+    BTN_SUBSCRIPTIONS = "📋 Мои подписки"
+    BTN_UNSUBSCRIBE = "❌ Отписаться"
+    BTN_ADMIN_SUBS = "🛠 Админ: подписки"
+    BTN_ADMIN_STATS = "📊 Админ: статистика"
+
     def __init__(self) -> None:
         if not settings.telegram_bot_token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
 
-        self._token = settings.telegram_bot_token
-        self._base_url = f"https://api.telegram.org/bot{self._token}"
-        self._offset = 0
         self._admin_usernames = {
             u.strip().lstrip("@").lower()
             for u in settings.telegram_admin_usernames.split(",")
             if u.strip()
         }
+        self._pending_inline_queries: dict[str, str] = {}
+        self._search_sessions: dict[str, dict[str, Any]] = {}
+        self._pending_user_action: dict[int, str] = {}
+        self._search_context_by_user: dict[int, dict[str, Any]] = {}
+        self._context_location_choices: dict[int, list[str]] = {}
 
-    async def _api(self, method: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        backoff = settings.telegram_api_backoff_base_seconds
-        for attempt in range(1, settings.telegram_api_max_retries + 1):
-            try:
-                async with httpx.AsyncClient(timeout=40) as client:
-                    response = await client.post(f"{self._base_url}/{method}", json=payload or {})
-                status = response.status_code
-                if status >= 400:
-                    if status in RETRYABLE_HTTP_STATUSES and attempt < settings.telegram_api_max_retries:
-                        await asyncio.sleep(backoff + random.uniform(0.0, settings.telegram_api_backoff_jitter_seconds))
-                        backoff *= 2
-                        continue
-                    response.raise_for_status()
+        self._debug_logger = self._build_debug_logger()
+        self.bot = Bot(
+            token=settings.telegram_bot_token,
+            default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN_V2),
+        )
+        self.dp = Dispatcher()
+        self.router = Router()
+        self.router.message.middleware(TelegramDebugMiddleware(self._tg_debug))
+        self.router.callback_query.middleware(TelegramDebugMiddleware(self._tg_debug))
+        self._register_handlers()
+        self.dp.include_router(self.router)
 
-                data = response.json()
-                if not data.get("ok", False):
-                    error_code = int(data.get("error_code", 500))
-                    if error_code in RETRYABLE_HTTP_STATUSES and attempt < settings.telegram_api_max_retries:
-                        retry_after = data.get("parameters", {}).get("retry_after")
-                        if retry_after:
-                            await asyncio.sleep(float(retry_after))
-                        else:
-                            await asyncio.sleep(backoff + random.uniform(0.0, settings.telegram_api_backoff_jitter_seconds))
-                        backoff *= 2
-                        continue
-                    raise RuntimeError(f"Telegram API error for {method}: {data}")
-                return data
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                if attempt >= settings.telegram_api_max_retries:
-                    raise RuntimeError(f"Telegram API network failure for {method}") from exc
-                await asyncio.sleep(backoff + random.uniform(0.0, settings.telegram_api_backoff_jitter_seconds))
-                backoff *= 2
+    @staticmethod
+    def _build_debug_logger() -> logging.Logger:
+        logger = logging.getLogger("telegram.debug")
+        logger.setLevel(logging.DEBUG)
+        if logger.handlers:
+            return logger
+        path = Path(settings.telegram_debug_log_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(path, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(handler)
+        logger.propagate = False
+        return logger
 
-        raise RuntimeError(f"Telegram API failed after retries for {method}")
+    def _tg_debug(self, event: str, payload: dict[str, Any]) -> None:
+        if not settings.telegram_debug_logging:
+            return
+        self._debug_logger.debug("%s %s", event, json.dumps(payload, ensure_ascii=False, default=str))
 
     @staticmethod
     def _escape_md(text: str) -> str:
@@ -78,54 +126,27 @@ class TelegramBotService:
             escaped = escaped.replace(ch, f"\\{ch}")
         return escaped
 
-    async def _send_message(
-        self,
-        chat_id: int,
-        text: str,
+    @classmethod
+    def _format_vacancy_card_md(
+        cls,
         *,
-        reply_markup: dict[str, Any] | None = None,
-        markdown: bool = False,
-    ) -> None:
-        payload: dict[str, Any] = {
-            "chat_id": chat_id,
-            "text": text,
-        }
-        if markdown:
-            payload["parse_mode"] = "MarkdownV2"
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
-        await self._api("sendMessage", payload)
-
-    async def send_message_public(self, chat_id: int, text: str) -> None:
-        """Public sender for background notification jobs."""
-        await self._send_message(chat_id, text)
-
-    async def _is_group_admin(self, chat_id: int, user_id: int) -> bool:
-        try:
-            result = await self._api(
-                "getChatMember",
-                {"chat_id": chat_id, "user_id": user_id},
-            )
-            status = result["result"].get("status")
-            return status in {"administrator", "creator"}
-        except Exception as exc:
-            log.warning("telegram.get_chat_member_failed", error=str(exc), chat_id=chat_id)
-            return False
-
-    async def _is_admin(self, chat_id: int, user: dict[str, Any]) -> bool:
-        username = (user.get("username") or "").lower()
-        if username and username in self._admin_usernames:
-            return True
-        return await self._is_group_admin(chat_id, int(user["id"]))
+        title: str,
+        company: str,
+        location: str,
+        url: str,
+    ) -> str:
+        """Build a MarkdownV2-safe vacancy card string."""
+        safe_title = cls._escape_md(title)
+        safe_company = cls._escape_md(company)
+        safe_location = cls._escape_md(location)
+        # URL can contain characters special for MarkdownV2 in plain text context.
+        safe_url = cls._escape_md(url)
+        return f"*{safe_title}*\n_{safe_company} \\| {safe_location}_\n{safe_url}"
 
     @staticmethod
     def _extract_args(text: str) -> str:
         parts = text.split(maxsplit=1)
         return parts[1].strip() if len(parts) > 1 else ""
-
-    @staticmethod
-    def _help_text() -> str:
-        return TelegramMessages.help_text()
 
     @staticmethod
     def _validate_regex_pattern(pattern: str) -> tuple[bool, str | None]:
@@ -135,31 +156,202 @@ class TelegramBotService:
             return False, "Regex слишком сложный: слишком много групп."
         if pattern.count("|") > settings.telegram_regex_max_alternations:
             return False, "Regex слишком сложный: слишком много альтернатив."
-        # Basic guard against nested quantifiers that can trigger heavy backtracking.
         risky = re.search(r"\((?:[^()]*[+*][^()]*)+\)[+*]", pattern)
         if risky:
             return False, "Regex содержит потенциально тяжелую вложенную квантификацию."
         return True, None
 
-    async def _handle_search(self, chat_id: int, user: dict[str, Any], text: str) -> None:
-        started = time.perf_counter()
-        query_raw = self._extract_args(text)
-        if not query_raw:
-            await self._send_message(chat_id, TelegramMessages.ASK_SEARCH_QUERY)
+    async def _send_text(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        markdown: bool = False,
+        reply_markup: InlineKeyboardMarkup | None = None,
+        reply_keyboard: ReplyKeyboardMarkup | None = None,
+    ) -> None:
+        self._tg_debug(
+            "telegram.request",
+            {"method": "sendMessage", "chat_id": chat_id, "text": text, "markdown": markdown},
+        )
+        msg = await self.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=ParseMode.MARKDOWN_V2 if markdown else None,
+            reply_markup=reply_markup or reply_keyboard,
+        )
+        self._tg_debug("telegram.response", {"method": "sendMessage", "message_id": msg.message_id})
+
+    def _main_menu(self, is_admin: bool) -> ReplyKeyboardMarkup:
+        rows: list[list[KeyboardButton]] = [
+            [KeyboardButton(text=self.BTN_SEARCH), KeyboardButton(text=self.BTN_CONTEXT_SEARCH)],
+            [KeyboardButton(text=self.BTN_SUBSCRIBE), KeyboardButton(text=self.BTN_SUBSCRIPTIONS)],
+            [KeyboardButton(text=self.BTN_UNSUBSCRIBE)],
+        ]
+        if is_admin:
+            rows.append([KeyboardButton(text=self.BTN_ADMIN_SUBS), KeyboardButton(text=self.BTN_ADMIN_STATS)])
+        return ReplyKeyboardMarkup(
+            keyboard=rows,
+            resize_keyboard=True,
+            one_time_keyboard=False,
+        )
+
+    async def send_message_public(self, chat_id: int, text: str) -> None:
+        await self._send_text(chat_id, text, markdown=False)
+
+    async def _is_admin(self, message: Message) -> bool:
+        user = message.from_user
+        if user is None:
+            return False
+        username = (user.username or "").lower()
+        if username and username in self._admin_usernames:
+            return True
+        try:
+            member = await self.bot.get_chat_member(message.chat.id, user.id)
+            return member.status in {"administrator", "creator"}
+        except Exception as exc:
+            self._tg_debug("telegram.get_chat_member_failed", {"error": str(exc)})
+            return False
+
+    async def _remember_user(self, user: User | None, chat_id: int | None = None) -> None:
+        if user is None:
             return
+        async with get_session() as session:
+            repo = TelegramUserRepository(session)
+            await repo.upsert_user(
+                telegram_user_id=user.id,
+                username=user.username,
+                first_name=user.first_name,
+                last_name=user.last_name,
+                language_code=user.language_code,
+                is_bot=user.is_bot,
+                is_premium=user.is_premium,
+                last_chat_id=chat_id,
+            )
 
-        is_admin = await self._is_admin(chat_id, user)
+    @staticmethod
+    def _new_context() -> dict[str, Any]:
+        return {
+            "query": None,
+            "location": None,
+            "date_days": None,
+            "salary_from": None,
+            "salary_to": None,
+            "auto_search": False,
+            "history": [],
+        }
+
+    def _get_context(self, user_id: int) -> dict[str, Any]:
+        if user_id not in self._search_context_by_user:
+            self._search_context_by_user[user_id] = self._new_context()
+        return self._search_context_by_user[user_id]
+
+    @staticmethod
+    def _context_menu_keyboard(auto_search: bool) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="🔤 Запрос", callback_data="ctx:set:query"),
+                    InlineKeyboardButton(text="📍 Локация", callback_data="ctx:set:location"),
+                ],
+                [
+                    InlineKeyboardButton(text="📅 Дата: 7 дней", callback_data="ctx:set:date7"),
+                    InlineKeyboardButton(text="💰 Зарплата", callback_data="ctx:set:salary"),
+                ],
+                [
+                    InlineKeyboardButton(text="🔎 Найти", callback_data="ctx:run"),
+                    InlineKeyboardButton(
+                        text=f"⚡ Автопоиск: {'вкл' if auto_search else 'выкл'}",
+                        callback_data="ctx:auto",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(text="↩️ Убрать последний", callback_data="ctx:undo"),
+                    InlineKeyboardButton(text="🧹 Очистить все", callback_data="ctx:clear"),
+                ],
+            ]
+        )
+
+    async def _open_context_menu(self, message: Message) -> None:
+        if message.from_user is None:
+            return
+        ctx = self._get_context(message.from_user.id)
+        await self._send_text(
+            message.chat.id,
+            TelegramMessages.context_summary(
+                query=ctx["query"],
+                location=ctx["location"],
+                salary_from=ctx["salary_from"],
+                salary_to=ctx["salary_to"],
+                date_days=ctx["date_days"],
+                auto_search=ctx["auto_search"],
+            ),
+            reply_markup=self._context_menu_keyboard(bool(ctx["auto_search"])),
+        )
+
+    async def _run_context_search(self, message: Message) -> None:
+        if message.from_user is None:
+            return
+        ctx = self._get_context(message.from_user.id)
+        query = str(ctx["query"] or "").strip()
+        parsed = parse_search_query(query) if query else parse_search_query("")
+        published_from: datetime | None = None
+        if ctx["date_days"]:
+            published_from = datetime.now(timezone.utc) - timedelta(days=int(ctx["date_days"]))
+        started = time.perf_counter()
+        is_admin = await self._is_admin(message)
+        async with get_session() as session:
+            repo = VacancySearchRepository(session)
+            rows = await repo.search(
+                includes=parsed.includes,
+                excludes=parsed.excludes,
+                fuzzy=parsed.fuzzy,
+                regex=parsed.regex if is_admin else None,
+                language=settings.deepl_target_lang,
+                limit=settings.telegram_search_limit,
+                is_admin=is_admin,
+                location=ctx["location"],
+                published_from=published_from,
+                salary_from=ctx["salary_from"],
+                salary_to=ctx["salary_to"],
+            )
+        if not rows:
+            await self._send_text(message.chat.id, TelegramMessages.NOTHING_FOUND)
+            return
+        total = len(rows)
+        show_all_threshold = max(1, settings.telegram_search_show_all_threshold)
+        next_batch_size = max(1, settings.telegram_search_next_batch_size)
+        if total <= show_all_threshold:
+            await self._send_rows(chat_id=message.chat.id, rows=rows, query_raw=query or "*")
+        else:
+            session_token = uuid.uuid4().hex[:12]
+            self._search_sessions[session_token] = {
+                "chat_id": message.chat.id,
+                "query_raw": query or "*",
+                "rows": rows,
+                "offset": 1,
+            }
+            await self._send_rows(chat_id=message.chat.id, rows=rows[:1], query_raw=query or "*")
+            await self._send_text(
+                message.chat.id,
+                TelegramMessages.search_many_found(total=total, next_count=next_batch_size),
+                reply_markup=self._search_controls_keyboard(session_token, has_more=True),
+            )
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        metrics_registry.observe_ms("search_latency_ms", elapsed_ms)
+
+    async def _execute_search(self, message: Message, query_raw: str) -> None:
+        started = time.perf_counter()
+        is_admin = await self._is_admin(message)
         parsed = parse_search_query(query_raw)
-
         if parsed.regex and not is_admin:
-            await self._send_message(chat_id, TelegramMessages.REGEX_ADMIN_ONLY)
+            await self._send_text(message.chat.id, TelegramMessages.REGEX_ADMIN_ONLY)
             return
         if parsed.regex:
             ok, reason = self._validate_regex_pattern(parsed.regex)
             if not ok:
-                await self._send_message(chat_id, reason or TelegramMessages.REGEX_REJECTED)
+                await self._send_text(message.chat.id, reason or TelegramMessages.REGEX_REJECTED)
                 return
-
         async with get_session() as session:
             repo = VacancySearchRepository(session)
             rows = await repo.search(
@@ -171,205 +363,525 @@ class TelegramBotService:
                 limit=settings.telegram_search_limit,
                 is_admin=is_admin,
             )
-
         if not rows:
-            await self._send_message(chat_id, TelegramMessages.NOTHING_FOUND)
+            await self._send_text(message.chat.id, TelegramMessages.NOTHING_FOUND)
             return
-
-        lines = []
-        for row in rows:
-            company = self._escape_md(row.company_name or "Unknown company")
-            location = self._escape_md(row.location or "Unknown location")
-            title = self._escape_md(row.title)
-            url = row.url
-            lines.append(f"*{title}*\n_{company} | {location}_\n{url}")
-            keyboard = {
-                "inline_keyboard": [
-                    [{"text": "Открыть вакансию", "url": url}],
-                    [{"text": "Подписаться на этот запрос", "callback_data": f"subq:{query_raw[:48]}"}],
-                ],
+        total = len(rows)
+        show_all_threshold = max(1, settings.telegram_search_show_all_threshold)
+        next_batch_size = max(1, settings.telegram_search_next_batch_size)
+        if total <= show_all_threshold:
+            await self._send_rows(
+                chat_id=message.chat.id,
+                rows=rows,
+                query_raw=query_raw,
+            )
+        else:
+            session_token = uuid.uuid4().hex[:12]
+            self._search_sessions[session_token] = {
+                "chat_id": message.chat.id,
+                "query_raw": query_raw,
+                "rows": rows,
+                "offset": 1,
             }
-            await self._send_message(chat_id, lines[-1], reply_markup=keyboard, markdown=True)
+            await self._send_rows(
+                chat_id=message.chat.id,
+                rows=rows[:1],
+                query_raw=query_raw,
+            )
+            await self._send_text(
+                message.chat.id,
+                TelegramMessages.search_many_found(total=total, next_count=next_batch_size),
+                reply_markup=self._search_controls_keyboard(session_token, has_more=True),
+            )
+
         elapsed_ms = (time.perf_counter() - started) * 1000
         metrics_registry.observe_ms("search_latency_ms", elapsed_ms)
         metrics_registry.observe_search_query_latency(query_raw, elapsed_ms)
-        top_n = settings.metrics_top_search_queries
-        expensive = metrics_registry.top_search_queries(top_n)
+        expensive = metrics_registry.top_search_queries(settings.metrics_top_search_queries)
         log.info(
             "search.expensive_queries",
-            top_n=top_n,
             items=[{"query": q, "latency_ms": round(ms, 2)} for q, ms in expensive],
         )
 
-    async def _handle_subscribe(self, chat_id: int, user: dict[str, Any], text: str) -> None:
-        query_raw = self._extract_args(text)
-        if not query_raw:
-            await self._send_message(chat_id, TelegramMessages.ASK_SUBSCRIBE_QUERY)
-            return
+    async def _send_rows(self, *, chat_id: int, rows: list[Any], query_raw: str) -> None:
+        for row in rows:
+            token = uuid.uuid4().hex[:12]
+            self._pending_inline_queries[token] = query_raw
+            card = self._format_vacancy_card_md(
+                title=getattr(row, "title", "") or "Untitled",
+                company=getattr(row, "company_name", "") or "Unknown company",
+                location=getattr(row, "location", "") or "Unknown location",
+                url=getattr(row, "url", ""),
+            )
+            url = getattr(row, "url", "")
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="Открыть вакансию", url=url)],
+                    [InlineKeyboardButton(text="Подписаться на этот запрос", callback_data=f"subq:{token}")],
+                ]
+            )
+            await self._send_text(chat_id, card, markdown=True, reply_markup=keyboard)
 
+    @staticmethod
+    def _search_controls_keyboard(session_token: str, *, has_more: bool) -> InlineKeyboardMarkup:
+        rows: list[list[InlineKeyboardButton]] = []
+        if has_more:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"Следующие {max(1, settings.telegram_search_next_batch_size)}",
+                        callback_data=f"s_next:{session_token}",
+                    )
+                ]
+            )
+        rows.append([InlineKeyboardButton(text="Показать все", callback_data=f"s_all:{session_token}")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _execute_subscribe(self, message: Message, query_raw: str) -> None:
+        if message.from_user is None:
+            return
         async with get_session() as session:
             repo = TelegramSubscriptionRepository(session)
             sub = await repo.add(
-                telegram_user_id=int(user["id"]),
-                username=user.get("username"),
-                chat_id=chat_id,
+                telegram_user_id=message.from_user.id,
+                username=message.from_user.username,
+                chat_id=message.chat.id,
                 query=query_raw,
             )
-        await self._send_message(chat_id, TelegramMessages.subscription_created(sub.id))
+        await self._send_text(message.chat.id, TelegramMessages.subscription_created(sub.id))
 
-    async def _handle_subscriptions(self, chat_id: int, user: dict[str, Any]) -> None:
-        async with get_session() as session:
-            repo = TelegramSubscriptionRepository(session)
-            rows = await repo.list_active_for_user(int(user["id"]))
-
-        if not rows:
-            await self._send_message(chat_id, TelegramMessages.NO_SUBSCRIPTIONS)
-            return
-
-        text = TelegramMessages.user_subscriptions([f"#{r.id}: {r.query}" for r in rows])
-        await self._send_message(chat_id, text)
-
-    async def _handle_unsubscribe(self, chat_id: int, user: dict[str, Any], text: str) -> None:
-        arg = self._extract_args(text)
-        if not arg.isdigit():
-            await self._send_message(chat_id, "Укажите ID: /unsubscribe <id>")
-            return
-
-        async with get_session() as session:
-            repo = TelegramSubscriptionRepository(session)
-            ok = await repo.cancel_for_user(int(arg), int(user["id"]))
-        await self._send_message(chat_id, TelegramMessages.subscription_cancelled(ok))
-
-    async def _handle_admin_subscriptions(self, chat_id: int, user: dict[str, Any]) -> None:
-        if not await self._is_admin(chat_id, user):
-            await self._send_message(chat_id, TelegramMessages.ADMIN_ONLY)
-            return
-
-        async with get_session() as session:
-            repo = TelegramSubscriptionRepository(session)
-            rows = await repo.list_all_active()
-
-        if not rows:
-            await self._send_message(chat_id, TelegramMessages.NO_ACTIVE_SUBSCRIPTIONS)
-            return
-
-        lines = [
-            f"#{r.id} user={r.telegram_user_id} @{r.username or '-'} chat={r.chat_id} query={r.query}"
-            for r in rows
-        ]
-        await self._send_message(chat_id, TelegramMessages.admin_subscriptions(lines))
-
-    async def _handle_admin_stats(self, chat_id: int, user: dict[str, Any]) -> None:
-        if not await self._is_admin(chat_id, user):
-            await self._send_message(chat_id, TelegramMessages.ADMIN_ONLY)
-            return
-
-        notify = get_last_notification_stats()
-        metrics = metrics_registry.snapshot()
-        text = (
-            "*Статистика рассылки и поиска*\n"
-            f"Подписок обработано: *{notify['subscriptions']}*\n"
-            f"Отправлено: *{notify['sent']}*\n"
-            f"Пропущено \\(уже отправляли\\): *{notify['skipped']}*\n"
-            f"Ошибок: *{notify['errors']}*\n\n"
-            f"cache\\_hit\\_rate: *{metrics.cache_hit_rate:.2%}*\n"
-            f"notifications\\_sent: *{metrics.notifications_sent}*\n"
-            f"search\\_latency\\_avg\\_ms: *{metrics.search_latency_avg_ms:.2f}*\n"
-            f"top\\_expensive\\_queries: *{len(metrics.top_search_queries)}*"
-        )
-        await self._send_message(chat_id, text, markdown=True)
-
-    async def _handle_callback_query(self, update: dict[str, Any]) -> None:
-        callback = update.get("callback_query")
-        if not callback:
-            return
-
-        data = callback.get("data") or ""
-        from_user = callback.get("from") or {}
-        message = callback.get("message") or {}
-        chat = message.get("chat") or {}
-
-        if not data.startswith("subq:") or "id" not in from_user or "id" not in chat:
-            await self._api("answerCallbackQuery", {"callback_query_id": callback["id"]})
-            return
-
-        query_raw = data[5:].strip()
-        if not query_raw:
-            await self._api("answerCallbackQuery", {"callback_query_id": callback["id"]})
-            return
-
-        async with get_session() as session:
-            repo = TelegramSubscriptionRepository(session)
-            sub = await repo.add(
-                telegram_user_id=int(from_user["id"]),
-                username=from_user.get("username"),
-                chat_id=int(chat["id"]),
-                query=query_raw,
+    def _register_handlers(self) -> None:
+        @self.router.message(Command("start"))
+        @self.router.message(Command("help"))
+        async def _help(message: Message) -> None:
+            await self._remember_user(message.from_user, message.chat.id)
+            await self._send_text(
+                message.chat.id,
+                TelegramMessages.help_text(),
+                reply_keyboard=self._main_menu(await self._is_admin(message)),
             )
 
-        await self._api(
-            "answerCallbackQuery",
-            {"callback_query_id": callback["id"], "text": f"Подписка #{sub.id} создана"},
-        )
+        @self.router.message(Command("search"))
+        async def _search(message: Message) -> None:
+            await self._remember_user(message.from_user, message.chat.id)
+            query = self._extract_args(message.text or "")
+            if not query:
+                if message.from_user:
+                    self._pending_user_action[message.from_user.id] = "search"
+                await self._send_text(message.chat.id, TelegramMessages.ASK_SEARCH_QUERY)
+                return
+            await self._execute_search(message, query)
 
-    async def _handle_update(self, update: dict[str, Any]) -> None:
-        if update.get("callback_query"):
-            await self._handle_callback_query(update)
-            return
+        @self.router.message(Command("subscribe"))
+        async def _subscribe(message: Message) -> None:
+            await self._remember_user(message.from_user, message.chat.id)
+            query = self._extract_args(message.text or "")
+            if not query:
+                if message.from_user:
+                    self._pending_user_action[message.from_user.id] = "subscribe"
+                await self._send_text(message.chat.id, TelegramMessages.ASK_SUBSCRIBE_QUERY)
+                return
+            await self._execute_subscribe(message, query)
 
-        message = update.get("message") or update.get("edited_message")
-        if not message:
-            return
+        @self.router.message(Command("subscriptions"))
+        async def _subscriptions(message: Message) -> None:
+            await self._remember_user(message.from_user, message.chat.id)
+            if message.from_user is None:
+                return
+            async with get_session() as session:
+                repo = TelegramSubscriptionRepository(session)
+                rows = await repo.list_active_for_user(message.from_user.id)
+            if not rows:
+                await self._send_text(message.chat.id, TelegramMessages.NO_SUBSCRIPTIONS)
+                return
+            await self._send_text(
+                message.chat.id,
+                TelegramMessages.user_subscriptions([f"#{r.id}: {r.query}" for r in rows]),
+            )
 
-        text = message.get("text") or ""
-        if not text.startswith("/"):
-            return
+        @self.router.message(Command("unsubscribe"))
+        async def _unsubscribe(message: Message) -> None:
+            await self._remember_user(message.from_user, message.chat.id)
+            if message.from_user is None:
+                return
+            arg = self._extract_args(message.text or "")
+            if not arg.isdigit():
+                if message.from_user:
+                    self._pending_user_action[message.from_user.id] = "unsubscribe"
+                await self._send_text(message.chat.id, "Укажите ID подписки для отмены:")
+                return
+            async with get_session() as session:
+                repo = TelegramSubscriptionRepository(session)
+                ok = await repo.cancel_for_user(int(arg), message.from_user.id)
+            await self._send_text(message.chat.id, TelegramMessages.subscription_cancelled(ok))
 
-        chat_id = int(message["chat"]["id"])
-        user = message.get("from")
-        if user is None:
-            return
+        @self.router.message(Command("admin_subscriptions"))
+        async def _admin_subs(message: Message) -> None:
+            await self._remember_user(message.from_user, message.chat.id)
+            if not await self._is_admin(message):
+                await self._send_text(message.chat.id, TelegramMessages.ADMIN_ONLY)
+                return
+            async with get_session() as session:
+                repo = TelegramSubscriptionRepository(session)
+                rows = await repo.list_all_active()
+            if not rows:
+                await self._send_text(message.chat.id, TelegramMessages.NO_ACTIVE_SUBSCRIPTIONS)
+                return
+            lines = [
+                f"#{r.id} user={r.telegram_user_id} @{r.username or '-'} chat={r.chat_id} query={r.query}"
+                for r in rows
+            ]
+            await self._send_text(message.chat.id, TelegramMessages.admin_subscriptions(lines))
 
-        try:
-            if text.startswith("/start") or text.startswith("/help"):
-                await self._send_message(chat_id, self._help_text())
-            elif text.startswith("/search"):
-                await self._handle_search(chat_id, user, text)
-            elif text.startswith("/subscribe"):
-                await self._handle_subscribe(chat_id, user, text)
-            elif text.startswith("/subscriptions"):
-                await self._handle_subscriptions(chat_id, user)
-            elif text.startswith("/unsubscribe"):
-                await self._handle_unsubscribe(chat_id, user, text)
-            elif text.startswith("/admin_subscriptions"):
-                await self._handle_admin_subscriptions(chat_id, user)
-            elif text.startswith("/admin_stats"):
-                await self._handle_admin_stats(chat_id, user)
-            else:
-                await self._send_message(chat_id, TelegramMessages.UNKNOWN_COMMAND)
-        except Exception as exc:
-            log.error("telegram.command_failed", error=str(exc))
-            await self._send_message(chat_id, TelegramMessages.COMMAND_ERROR)
+        @self.router.message(Command("admin_stats"))
+        async def _admin_stats(message: Message) -> None:
+            await self._remember_user(message.from_user, message.chat.id)
+            if not await self._is_admin(message):
+                await self._send_text(message.chat.id, TelegramMessages.ADMIN_ONLY)
+                return
+            notify = get_last_notification_stats()
+            metrics = metrics_registry.snapshot()
+            lines = [
+                "Статистика рассылки и поиска",
+                f"Подписок обработано: {notify['subscriptions']}",
+                f"Отправлено: {notify['sent']}",
+                f"Пропущено (уже отправляли): {notify['skipped']}",
+                f"Ошибок: {notify['errors']}",
+                "",
+                f"cache_hit_rate: {metrics.cache_hit_rate:.2%}",
+                f"notifications_sent: {metrics.notifications_sent}",
+                f"search_latency_avg_ms: {metrics.search_latency_avg_ms:.2f}",
+                "top expensive queries:",
+            ]
+            top = metrics.top_search_queries[: settings.metrics_top_search_queries]
+            lines.extend(
+                ["- (empty)"]
+                if not top
+                else [f"- {latency:.2f} ms | {(query[:80] + ('...' if len(query) > 80 else ''))}" for query, latency in top]
+            )
+            await self._send_text(message.chat.id, "\n".join(lines))
+
+        @self.router.callback_query()
+        async def _callback(callback: CallbackQuery) -> None:
+            await self._remember_user(
+                callback.from_user,
+                callback.message.chat.id if callback.message else None,
+            )
+            data = callback.data or ""
+            if data.startswith("ctx:"):
+                if callback.message is None or callback.from_user is None:
+                    await callback.answer()
+                    return
+                user_id = callback.from_user.id
+                ctx = self._get_context(user_id)
+                if data == "ctx:set:query":
+                    self._pending_user_action[user_id] = "ctx_query"
+                    await self._send_text(callback.message.chat.id, TelegramMessages.ASK_CONTEXT_QUERY)
+                    await callback.answer()
+                    return
+                if data == "ctx:set:location":
+                    async with get_session() as session:
+                        repo = VacancySearchRepository(session)
+                        choices = await repo.list_top_locations(limit=8)
+                    self._context_location_choices[user_id] = choices
+                    keyboard_rows: list[list[InlineKeyboardButton]] = [
+                        [InlineKeyboardButton(text=loc[:50], callback_data=f"ctx:loc:{idx}")]
+                        for idx, loc in enumerate(choices)
+                    ]
+                    keyboard_rows.append(
+                        [InlineKeyboardButton(text="✍️ Другое", callback_data="ctx:loc:custom")]
+                    )
+                    await self._send_text(
+                        callback.message.chat.id,
+                        "Выберите местоположение:",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows),
+                    )
+                    await callback.answer()
+                    return
+                if data.startswith("ctx:loc:"):
+                    suffix = data.split(":", 2)[2]
+                    if suffix == "custom":
+                        self._pending_user_action[user_id] = "ctx_location_custom"
+                        await self._send_text(
+                            callback.message.chat.id, TelegramMessages.ASK_CONTEXT_LOCATION_CUSTOM
+                        )
+                        await callback.answer()
+                        return
+                    if suffix.isdigit():
+                        idx = int(suffix)
+                        choices = self._context_location_choices.get(user_id, [])
+                        if 0 <= idx < len(choices):
+                            ctx["history"].append(("location", ctx["location"]))
+                            ctx["location"] = choices[idx]
+                            await self._open_context_menu(callback.message)
+                            if ctx["auto_search"]:
+                                await self._run_context_search(callback.message)
+                    await callback.answer()
+                    return
+                if data == "ctx:set:date7":
+                    ctx["history"].append(("date_days", ctx["date_days"]))
+                    ctx["date_days"] = 7
+                    await self._open_context_menu(callback.message)
+                    if ctx["auto_search"]:
+                        await self._run_context_search(callback.message)
+                    await callback.answer("Фильтр даты применен")
+                    return
+                if data == "ctx:set:salary":
+                    async with get_session() as session:
+                        repo = VacancySearchRepository(session)
+                        salary_suggestions = await repo.list_salary_suggestions(limit=6)
+                    buttons: list[list[InlineKeyboardButton]] = []
+                    for amount in salary_suggestions:
+                        buttons.append(
+                            [
+                                InlineKeyboardButton(
+                                    text=f"ОТ {amount}",
+                                    callback_data=f"ctx:salary_from:{amount}",
+                                ),
+                                InlineKeyboardButton(
+                                    text=f"ДО {amount}",
+                                    callback_data=f"ctx:salary_to:{amount}",
+                                ),
+                            ]
+                        )
+                    buttons.extend(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    text="✍️ Ввести ОТ", callback_data="ctx:salary:input_from"
+                                ),
+                                InlineKeyboardButton(
+                                    text="✍️ Ввести ДО", callback_data="ctx:salary:input_to"
+                                ),
+                            ],
+                            [
+                                InlineKeyboardButton(
+                                    text="✍️ Ввести ОТ-ДО", callback_data="ctx:salary:input_range"
+                                )
+                            ],
+                        ]
+                    )
+                    await self._send_text(
+                        callback.message.chat.id,
+                        "Выберите фильтр зарплаты:",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+                    )
+                    await callback.answer()
+                    return
+                if data.startswith("ctx:salary_from:"):
+                    amount = data.split(":")[-1]
+                    if amount.isdigit():
+                        ctx["history"].append(("salary_from", ctx["salary_from"]))
+                        ctx["salary_from"] = int(amount)
+                        await self._open_context_menu(callback.message)
+                        if ctx["auto_search"]:
+                            await self._run_context_search(callback.message)
+                    await callback.answer()
+                    return
+                if data.startswith("ctx:salary_to:"):
+                    amount = data.split(":")[-1]
+                    if amount.isdigit():
+                        ctx["history"].append(("salary_to", ctx["salary_to"]))
+                        ctx["salary_to"] = int(amount)
+                        await self._open_context_menu(callback.message)
+                        if ctx["auto_search"]:
+                            await self._run_context_search(callback.message)
+                    await callback.answer()
+                    return
+                if data == "ctx:salary:input_from":
+                    self._pending_user_action[user_id] = "ctx_salary_from"
+                    await self._send_text(callback.message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_FROM)
+                    await callback.answer()
+                    return
+                if data == "ctx:salary:input_to":
+                    self._pending_user_action[user_id] = "ctx_salary_to"
+                    await self._send_text(callback.message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_TO)
+                    await callback.answer()
+                    return
+                if data == "ctx:salary:input_range":
+                    self._pending_user_action[user_id] = "ctx_salary_range"
+                    await self._send_text(callback.message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_RANGE)
+                    await callback.answer()
+                    return
+                if data == "ctx:auto":
+                    ctx["auto_search"] = not bool(ctx["auto_search"])
+                    await self._open_context_menu(callback.message)
+                    await callback.answer()
+                    return
+                if data == "ctx:undo":
+                    if not ctx["history"]:
+                        await callback.answer(TelegramMessages.CONTEXT_EMPTY)
+                        return
+                    field, old_value = ctx["history"].pop()
+                    ctx[field] = old_value
+                    await self._open_context_menu(callback.message)
+                    await callback.answer()
+                    return
+                if data == "ctx:clear":
+                    self._search_context_by_user[user_id] = self._new_context()
+                    await self._open_context_menu(callback.message)
+                    await callback.answer(TelegramMessages.CONTEXT_RESET)
+                    return
+                if data == "ctx:run":
+                    await self._run_context_search(callback.message)
+                    await callback.answer()
+                    return
+            if data.startswith("s_next:") or data.startswith("s_all:"):
+                token = data.split(":", 1)[1]
+                session = self._search_sessions.get(token)
+                if callback.message is None or session is None:
+                    await callback.answer("Запрос устарел", show_alert=False)
+                    return
+                rows = session["rows"]
+                offset = int(session["offset"])
+                total = len(rows)
+                next_batch_size = max(1, settings.telegram_search_next_batch_size)
+                if data.startswith("s_all:"):
+                    batch = rows[offset:]
+                    session["offset"] = total
+                else:
+                    next_offset = min(total, offset + next_batch_size)
+                    batch = rows[offset:next_offset]
+                    session["offset"] = next_offset
+                if batch:
+                    await self._send_rows(
+                        chat_id=callback.message.chat.id,
+                        rows=batch,
+                        query_raw=session["query_raw"],
+                    )
+                new_offset = int(session["offset"])
+                remaining = total - new_offset
+                if remaining > 0:
+                    await self._send_text(
+                        callback.message.chat.id,
+                        TelegramMessages.search_remaining(
+                            remaining=remaining,
+                            next_count=min(next_batch_size, remaining),
+                        ),
+                        reply_markup=self._search_controls_keyboard(token, has_more=remaining > 0),
+                    )
+                else:
+                    self._search_sessions.pop(token, None)
+                    await self._send_text(callback.message.chat.id, "Показаны все объявления.")
+                await callback.answer()
+                return
+            if not data.startswith("subq:"):
+                await callback.answer()
+                return
+            token = data[5:]
+            query_raw = self._pending_inline_queries.get(token, "")
+            if not query_raw or callback.from_user is None or callback.message is None:
+                await callback.answer()
+                return
+            async with get_session() as session:
+                repo = TelegramSubscriptionRepository(session)
+                sub = await repo.add(
+                    telegram_user_id=callback.from_user.id,
+                    username=callback.from_user.username,
+                    chat_id=callback.message.chat.id,
+                    query=query_raw,
+                )
+            self._pending_inline_queries.pop(token, None)
+            await callback.answer(text=f"Подписка #{sub.id} создана")
+
+        @self.router.message()
+        async def _pending_text(message: Message) -> None:
+            await self._remember_user(message.from_user, message.chat.id)
+            if message.from_user is None or not message.text or message.text.startswith("/"):
+                return
+            if message.text == self.BTN_SEARCH:
+                self._pending_user_action[message.from_user.id] = "search"
+                await self._send_text(message.chat.id, TelegramMessages.ASK_SEARCH_QUERY)
+                return
+            if message.text == self.BTN_CONTEXT_SEARCH:
+                await self._open_context_menu(message)
+                return
+            if message.text == self.BTN_SUBSCRIBE:
+                self._pending_user_action[message.from_user.id] = "subscribe"
+                await self._send_text(message.chat.id, TelegramMessages.ASK_SUBSCRIBE_QUERY)
+                return
+            if message.text == self.BTN_SUBSCRIPTIONS:
+                await _subscriptions(message)
+                return
+            if message.text == self.BTN_UNSUBSCRIBE:
+                self._pending_user_action[message.from_user.id] = "unsubscribe"
+                await self._send_text(message.chat.id, "Укажите ID подписки для отмены:")
+                return
+            if message.text == self.BTN_ADMIN_SUBS:
+                await _admin_subs(message)
+                return
+            if message.text == self.BTN_ADMIN_STATS:
+                await _admin_stats(message)
+                return
+            action = self._pending_user_action.pop(message.from_user.id, "")
+            if action == "search":
+                await self._execute_search(message, message.text.strip())
+            elif action == "subscribe":
+                await self._execute_subscribe(message, message.text.strip())
+            elif action == "unsubscribe":
+                if message.text.strip().isdigit():
+                    async with get_session() as session:
+                        repo = TelegramSubscriptionRepository(session)
+                        ok = await repo.cancel_for_user(int(message.text.strip()), message.from_user.id)
+                    await self._send_text(message.chat.id, TelegramMessages.subscription_cancelled(ok))
+                else:
+                    await self._send_text(message.chat.id, "Нужен числовой ID подписки.")
+            elif action == "ctx_query":
+                ctx = self._get_context(message.from_user.id)
+                ctx["history"].append(("query", ctx["query"]))
+                ctx["query"] = message.text.strip()
+                await self._open_context_menu(message)
+                if ctx["auto_search"]:
+                    await self._run_context_search(message)
+            elif action == "ctx_location_custom":
+                ctx = self._get_context(message.from_user.id)
+                ctx["history"].append(("location", ctx["location"]))
+                ctx["location"] = message.text.strip()
+                await self._open_context_menu(message)
+                if ctx["auto_search"]:
+                    await self._run_context_search(message)
+            elif action == "ctx_salary_from":
+                if message.text.strip().isdigit():
+                    ctx = self._get_context(message.from_user.id)
+                    ctx["history"].append(("salary_from", ctx["salary_from"]))
+                    ctx["salary_from"] = int(message.text.strip())
+                    await self._open_context_menu(message)
+                    if ctx["auto_search"]:
+                        await self._run_context_search(message)
+                else:
+                    await self._send_text(message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_FROM)
+            elif action == "ctx_salary_to":
+                if message.text.strip().isdigit():
+                    ctx = self._get_context(message.from_user.id)
+                    ctx["history"].append(("salary_to", ctx["salary_to"]))
+                    ctx["salary_to"] = int(message.text.strip())
+                    await self._open_context_menu(message)
+                    if ctx["auto_search"]:
+                        await self._run_context_search(message)
+                else:
+                    await self._send_text(message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_TO)
+            elif action == "ctx_salary_range":
+                parts = message.text.strip().split()
+                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                    low = int(parts[0])
+                    high = int(parts[1])
+                    if low > high:
+                        low, high = high, low
+                    ctx = self._get_context(message.from_user.id)
+                    ctx["history"].append(("salary_from", ctx["salary_from"]))
+                    ctx["history"].append(("salary_to", ctx["salary_to"]))
+                    ctx["salary_from"] = low
+                    ctx["salary_to"] = high
+                    await self._open_context_menu(message)
+                    if ctx["auto_search"]:
+                        await self._run_context_search(message)
+                else:
+                    await self._send_text(message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_RANGE)
 
     async def run(self) -> None:
-        log.info("telegram.bot_started")
-        while True:
-            try:
-                response = await self._api(
-                    "getUpdates",
-                    {
-                        "offset": self._offset,
-                        "timeout": settings.telegram_poll_timeout_seconds,
-                    },
-                )
-                for update in response.get("result", []):
-                    self._offset = int(update["update_id"]) + 1
-                    await self._handle_update(update)
-            except Exception as exc:
-                log.error("telegram.poll_failed", error=str(exc))
-                await asyncio.sleep(2)
+        log.info("telegram.bot_started", framework="aiogram")
+        await self.dp.start_polling(self.bot)
 
 
 async def run_telegram_bot() -> None:
-    bot = TelegramBotService()
-    await bot.run()
+    await TelegramBotService().run()

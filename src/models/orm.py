@@ -252,6 +252,35 @@ class TelegramSubscription(Base):
         return f"<TelegramSubscription {self.telegram_user_id} active={self.is_active}>"
 
 
+class TelegramUser(Base):
+    """Registry of all Telegram users who interacted with the bot."""
+
+    __tablename__ = "telegram_users"
+    __table_args__ = (
+        Index("ix_telegram_users_username", "username"),
+        Index("ix_telegram_users_last_seen_at", "last_seen_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
+    username: Mapped[str | None] = mapped_column(String(255))
+    first_name: Mapped[str | None] = mapped_column(String(255))
+    last_name: Mapped[str | None] = mapped_column(String(255))
+    language_code: Mapped[str | None] = mapped_column(String(32))
+    is_bot: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_premium: Mapped[bool | None] = mapped_column(Boolean)
+    last_chat_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<TelegramUser {self.telegram_user_id} @{self.username or '-'}>"
+
+
 class TelegramSubscriptionDelivery(Base):
     """Dedup log of delivered vacancies for each subscription."""
 
