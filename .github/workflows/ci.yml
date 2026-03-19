@@ -98,6 +98,13 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://scraper:scraper_pass@localhost:5432/job_scraper_test
         run: poetry run alembic upgrade head
 
+      - name: Migration smoke test (downgrade/upgrade on clean DB)
+        env:
+          DATABASE_URL: postgresql+asyncpg://scraper:scraper_pass@localhost:5432/job_scraper_test
+        run: |
+          poetry run alembic downgrade base
+          poetry run alembic upgrade head
+
       - name: Run tests
         env:
           DATABASE_URL: postgresql+asyncpg://scraper:scraper_pass@localhost:5432/job_scraper_test

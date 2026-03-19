@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import abc
+import asyncio
 import html
 import json
 import traceback
@@ -21,15 +22,28 @@ class BaseScraper(abc.ABC):
     """
     Abstract Playwright-based scraper.
 
-    Subclasses implement `scrape_page` which yields VacancyData items.
-    The base class handles browser lifecycle, retries and logging.
+    Subclasses implement `scrape_all` which yields VacancyData items.
+    The base class handles browser lifecycle, retries, logging and
+    optional detail-page HTML fetching.
+
+    Detail page fetching
+    --------------------
+    Set ``fetch_detail_html = True`` in a subclass to automatically open
+    each vacancy URL and store the raw HTML in ``VacancyData.page_html``.
+    A dedicated second page is reused for all detail requests so list
+    pagination is never interrupted.
     """
 
     source: str  # must be set in subclass
 
+    # ── Detail-page options (override in subclass) ─────────────────────
+    fetch_detail_html: bool = False
+    detail_fetch_delay_ms: int = 800  # polite delay between detail requests
+
     def __init__(self) -> None:
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
+        self._detail_page: Page | None = None
 
     # ------------------------------------------------------------------
     # Browser lifecycle
@@ -56,13 +70,18 @@ class BaseScraper(abc.ABC):
             locale="en-US",
             timezone_id="Europe/Vilnius",
         )
-        # Hide webdriver flag
         await self._context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
+        # Pre-open a dedicated page for detail requests
+        if self.fetch_detail_html:
+            self._detail_page = await self._context.new_page()
+            self._detail_page.set_default_timeout(settings.scraper_timeout_ms)
         return self
 
     async def __aexit__(self, *_: object) -> None:
+        if self._detail_page:
+            await self._detail_page.close()
         if self._context:
             await self._context.close()
         if self._browser:
@@ -85,7 +104,7 @@ class BaseScraper(abc.ABC):
         reraise=True,
     )
     async def run(self) -> list[VacancyData]:
-        """Scrape all vacancies from the source."""
+        """Scrape all vacancies (with optional detail HTML) from the source."""
         log.info("scraper.start", source=self.source)
         results: list[VacancyData] = []
         try:
@@ -103,8 +122,52 @@ class BaseScraper(abc.ABC):
 
     @abc.abstractmethod
     async def scrape_all(self) -> AsyncGenerator[VacancyData, None]:
-        """Yield VacancyData items from all pages."""
+        """Yield VacancyData items from all list pages."""
         ...
+
+    # ------------------------------------------------------------------
+    # Detail-page HTML fetching
+    # ------------------------------------------------------------------
+
+    async def get_detail_html(self, url: str) -> str | None:
+        """
+        Navigate to a vacancy detail page and return its full HTML.
+
+        Uses the shared ``_detail_page`` so the list page is untouched.
+        Returns None on any error (timeout, 403, etc.) without raising.
+        """
+        if not self._detail_page:
+            log.warning("detail_page.not_initialised", url=url)
+            return None
+
+        try:
+            if self.detail_fetch_delay_ms:
+                await asyncio.sleep(self.detail_fetch_delay_ms / 1000)
+
+            await self._detail_page.goto(url, wait_until="domcontentloaded")
+            page_html = await self._detail_page.content()
+            log.debug("detail_page.fetched", url=url, size=len(page_html))
+            return page_html
+
+        except Exception as exc:
+            log.warning("detail_page.error", url=url, error=str(exc))
+            return None
+
+    async def enrich_with_detail(self, vacancy: VacancyData) -> VacancyData:
+        """
+        Fetch detail page HTML and attach it to the vacancy.
+
+        Example usage in subclass::
+
+            async def scrape_all(self):
+                async for item in self._scrape_list():
+                    item = await self.enrich_with_detail(item)
+                    yield item
+        """
+        page_html = await self.get_detail_html(vacancy.url)
+        if page_html:
+            vacancy = vacancy.model_copy(update={"page_html": page_html})
+        return vacancy
 
     # ------------------------------------------------------------------
     # Helpers
@@ -115,19 +178,20 @@ class BaseScraper(abc.ABC):
         """
         Parse a raw salary string.
 
-        Returns (salary_min, salary_max, currency).
+        Returns (salary_min, salary_max, currency, salary_period).
         """
         salary_min = None
         salary_max = None
         currency = None
         salary_period = None
+
         if not raw:
             return salary_min, salary_max, currency, salary_period
 
         import re
 
         raw = raw.replace("\xa0", "").replace(" ", "")
-        currency = None
+
         if "€" in raw or "EUR" in raw:
             currency = "EUR"
         elif "$" in raw:
@@ -139,20 +203,23 @@ class BaseScraper(abc.ABC):
 
         values = [int(n) for n in nums if int(n) > 0]
         if len(values) == 1:
-            salary_min=values[0]
+            salary_min = values[0]
         if len(values) >= 2:
             salary_min, salary_max = min(values[:2]), max(values[:2])
+
         if "ч" in raw.lower() or "h" in raw.lower():
             salary_period = "hour"
         else:
             salary_period = "month"
+
         return salary_min, salary_max, currency, salary_period
 
     @staticmethod
     def decode_content(content: str, to_json: bool = False) -> str | dict:
-        encoded = 'utf-8'  # 'cp1252' get by Content-Type header
-        content = html.unescape(content)  # decode HTML entities
-        content.replace('\\/', '/').encode(encoded).decode(encoded)
+        """Decode HTML entities and optionally parse as JSON."""
+        encoded = "utf-8"
+        content = html.unescape(content)
+        content.replace("\\/", "/").encode(encoded).decode(encoded)
         if to_json:
-            content = json.loads(content)
+            return json.loads(content)
         return content

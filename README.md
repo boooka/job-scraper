@@ -36,6 +36,7 @@ docker compose up -d
 
 # Watch logs
 docker compose logs -f scraper
+docker compose logs -f bot
 
 # Run a one-off scrape (dev override)
 docker compose -f docker-compose.yml -f docker-compose.override.yml up scraper
@@ -142,6 +143,97 @@ Required GitHub secrets:
 - `DEPLOY_HOST` — production server IP
 - `DEPLOY_USER` — SSH user
 - `DEPLOY_SSH_KEY` — private SSH key
+
+## Telegram UX and admin
+
+- Bot responses use `MarkdownV2` formatting for better readability.
+- Search results now include inline buttons:
+  - `Открыть вакансию`
+  - `Подписаться на этот запрос`
+- New admin command:
+  - `/admin_stats` — shows notifications stats (sent/skipped/errors) + key metrics.
+
+## Runtime metrics (early degradation signals)
+
+The app tracks lightweight in-process metrics:
+- `cache_hit_rate` — translation cache efficiency
+- `notifications_sent` — total sent subscription notifications
+- `search_latency` — average search latency in ms
+
+These are exposed in `/admin_stats` and structured logs.
+
+## Production deploy and operations (Docker, remote server)
+
+Recommended host path: `/opt/job-scraper`.
+
+### 1) First-time server bootstrap
+
+```bash
+sudo mkdir -p /opt/job-scraper
+sudo chown -R $USER:$USER /opt/job-scraper
+cd /opt/job-scraper
+
+git clone <repo-url> .
+cp .env.example .env
+# edit .env: TELEGRAM_BOT_TOKEN, DATABASE_URL and schedules
+```
+
+### 2) Build and start
+
+```bash
+docker compose build
+docker compose up -d
+docker compose ps
+```
+
+### 3) Useful deploy commands
+
+```bash
+# Pull latest code + rebuild + restart
+git pull
+docker compose build --no-cache
+docker compose up -d --remove-orphans
+
+# Run migrations manually
+docker compose run --rm migrate
+
+# Restart only bot or scheduler
+docker compose restart bot
+docker compose restart scraper
+```
+
+### 4) Monitoring commands
+
+```bash
+# Live logs
+docker compose logs -f scraper
+docker compose logs -f bot
+docker compose logs -f postgres
+
+# Health/process checks
+docker compose ps
+docker stats
+
+# DB connectivity quick check
+docker compose exec postgres pg_isready -U scraper -d job_scraper
+```
+
+### 5) Maintenance commands
+
+```bash
+# Open shell in app container
+docker compose exec scraper sh
+
+# Backup DB
+docker compose exec postgres pg_dump -U scraper -d job_scraper > backup.sql
+
+# Restore DB
+cat backup.sql | docker compose exec -T postgres psql -U scraper -d job_scraper
+
+# Cleanup old images/volumes
+docker image prune -f
+docker volume ls
+```
 
 ## Adding a New Source
 

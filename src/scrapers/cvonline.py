@@ -20,7 +20,7 @@ class CVOnlineScraper(BaseScraper):
     """Scraper for cvonline.lt with offset-based pagination."""
 
     source = "cvonline"
-    is_active = False
+    is_active = True
 
     async def scrape_all(self) -> AsyncGenerator[VacancyData, None]:
         page = await self.new_page()

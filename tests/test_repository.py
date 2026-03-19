@@ -62,7 +62,7 @@ async def test_upsert_detects_salary_change(db_session):
         _make_vacancy(salary_min=2500, salary_max=3500)
     )
 
-    assert action == "changed"
+    assert action == "updated"
     field_names = {c.field_name for c in changes}
     assert "salary_min" in field_names
     assert "salary_max" in field_names
@@ -74,7 +74,7 @@ async def test_upsert_detects_title_change(db_session):
     await repo.upsert_vacancy(_make_vacancy(title="Old Title"))
     action, changes = await repo.upsert_vacancy(_make_vacancy(title="New Title"))
 
-    assert action == "changed"
+    assert action == "updated"
     assert any(c.field_name == "title" and c.old_value == "Old Title" for c in changes)
 
 
@@ -105,7 +105,7 @@ async def test_vacancy_change_record_saved(db_session):
 
     from sqlalchemy import select
     result = await db_session.execute(
-        select(VacancyChange).where(VacancyChange.field_name == "company")
+        select(VacancyChange).where(VacancyChange.field_name == "company_name")
     )
     change = result.scalar_one()
     assert change.old_value == "Old Corp"

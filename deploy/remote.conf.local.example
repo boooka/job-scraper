@@ -1,0 +1,9 @@
+# Скопируйте в remote.conf.local и при необходимости измените.
+# remote.conf.local не попадает в git (игнорируется при rsync push).
+
+REMOTE_USER=deploy_user
+REMOTE_HOST=deploy.example.com
+REMOTE_PORT=2222
+REMOTE_DIR=~/tamo_bot
+
+# SSH_KEY=~/.ssh/id_rsa

@@ -10,3 +10,5 @@ htmlcov/
 coverage.xml
 dist/
 *.egg-info/
+debug_output/
+remote.conf

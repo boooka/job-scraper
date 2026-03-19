@@ -45,9 +45,13 @@ async def main() -> None:
         await create_tables()
         log.info("db.tables_created")
 
+    elif command == "bot":
+        from src.services.telegram_bot import run_telegram_bot
+        await run_telegram_bot()
+
     else:
         print(f"Unknown command: {command}")
-        print("Usage: python -m src.main [scheduler|scrape [source]|migrate]")
+        print("Usage: python -m src.main [scheduler|scrape [source]|migrate|bot]")
         sys.exit(1)
 
 

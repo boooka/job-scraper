@@ -47,8 +47,10 @@ class CVBankasScraper(BaseScraper):
                         log.warning("cvbankas.parse_error", error=str(exc))
 
                 # Check for next page
-                next_btn = await page.query_selector("a.prev_next")
-                if not next_btn:
+                next_el = await page.query_selector("ul.pages_ul a.prev_next:last-child")
+                quote = await next_el.inner_text() if next_el else None
+                # First page has no prev button
+                if quote == "»" and page_num > 1:
                     log.info("cvbankas.parser", error=f"Next button for page {page_num} is inactive")
                     break
                 page_num += 1
@@ -69,10 +71,14 @@ class CVBankasScraper(BaseScraper):
             return None
 
         href = await link_el.get_attribute("href") or ""
-        external_id_match = re.search(r"/(\d+)/?$", href)
+        external_id_match = re.search(r"/([-\w\d]+/\d*-\d+)/?$", href)
         if not external_id_match:
-            external_id_match = re.search(r"id=(\w+)", href)
+            external_id_match = re.search(f"{BASE_URL}(.*)/?$", href)
         external_id = external_id_match.group(1) if external_id_match else href
+
+        if not external_id:
+            log.warning("cvbankas.parser", error=f"External ID for {href} is not found")
+            return None
 
         title_el = await item.query_selector("h3.list_h3")
         title = (await title_el.inner_text()).strip() if title_el else "Unknown"
@@ -87,7 +93,7 @@ class CVBankasScraper(BaseScraper):
         raw_salary = (await salary_el.inner_text()).strip() if salary_el else None
         salary_min, salary_max, currency, salary_period = self.parse_salary(raw_salary)
 
-        url = href if href.startswith("http") else f"https://en.cvbankas.lt{href}"
+        url = href if href.startswith("http") else f"https://ru.cvbankas.lt{href}"
 
         return VacancyData(
             source=self.source,
@@ -101,4 +107,5 @@ class CVBankasScraper(BaseScraper):
             salary_currency=currency,
             salary_period=salary_period,
             extra={"raw_salary": raw_salary},
+            
         )

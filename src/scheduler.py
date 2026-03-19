@@ -14,6 +14,8 @@ from src.scrapers.cvonline import CVOnlineScraper
 from src.scrapers.cv import CVScraper   
 
 from src.services.scrape_service import run_scrape
+from src.services.subscription_notifier import run_subscription_notifications
+from src.services.translation_service import run_pending_translations
 
 log = get_logger(__name__)
 
@@ -72,6 +74,30 @@ def create_scheduler() -> AsyncIOScheduler:
         max_instances=1,
         misfire_grace_time=300,
     )
+
+        # Translation catch-up job — handles any vacancies missed by real-time trigger
+    # (e.g. if DeepL was unavailable during scrape)
+    if settings.deepl_api_key:
+        scheduler.add_job(
+            run_pending_translations,
+            trigger=_parse_cron(settings.schedule_translations),
+            id="translations",
+            name="DeepL translation catch-up",
+            max_instances=1,
+            misfire_grace_time=600,
+        )
+
+    if settings.telegram_bot_token:
+        scheduler.add_job(
+            run_subscription_notifications,
+            trigger=_parse_cron(settings.schedule_subscription_notifications),
+            id="subscription_notifications",
+            name="Telegram subscription notifications",
+            max_instances=1,
+            misfire_grace_time=300,
+        )
+
+
     return scheduler
 
 

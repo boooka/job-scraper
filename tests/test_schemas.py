@@ -30,7 +30,7 @@ class _DummyScraper(BaseScraper):
 )
 def test_parse_salary(raw, expected_min, expected_max, expected_currency):
     s = _DummyScraper.__new__(_DummyScraper)
-    lo, hi, cur = s.parse_salary(raw)
+    lo, hi, cur, _period = s.parse_salary(raw)
     assert lo == expected_min
     assert hi == expected_max
     assert cur == expected_currency

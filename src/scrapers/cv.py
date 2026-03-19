@@ -20,7 +20,7 @@ class CVScraper(BaseScraper):
     """Scraper for cv.lt (English interface)."""
 
     source = "cv"
-    is_active = False
+    is_active = True
 
     async def scrape_all(self) -> AsyncGenerator[VacancyData, None]:
         page = await self.new_page()
