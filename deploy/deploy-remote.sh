@@ -43,7 +43,8 @@ SCP_OPTS=()
 
 REMOTE="${REMOTE_USER}@${REMOTE_HOST}"
 ssh_cmd() { ssh "${SSH_OPTS[@]}" "$REMOTE" "$@"; }
-scp_cmd() { scp "${SCP_OPTS[@]}" "$REMOTE:$REMOTE_DIR/backups/$@" "$LOCAL_DIR/backups/$@"; }
+scp_from_remote() { scp "${SCP_OPTS[@]}" "$REMOTE:$1" "$2"; }
+scp_to_remote() { scp "${SCP_OPTS[@]}" "$1" "$REMOTE:$2"; }
 
 cmd="${1:-help}"
 
@@ -98,13 +99,71 @@ case "$cmd" in
     ssh_cmd "cd $REMOTE_DIR && ./deploy/deploy-local.sh backup"
     mkdir -p "$LOCAL_DIR/backups"
     latest_file="$(ssh_cmd "ls -1t $REMOTE_DIR/backups/job-scraper-*.sql.gz 2>/dev/null | head -n 1 | xargs -n1 basename" || true)"
+    latest_env="$(ssh_cmd "ls -1t $REMOTE_DIR/backups/env-*.bak 2>/dev/null | head -n 1 | xargs -n1 basename" || true)"
     if [ -n "${latest_file:-}" ]; then
       info "Скачиваю последний бэкап: $latest_file"
-      scp_cmd "$latest_file"
+      scp_from_remote "$REMOTE_DIR/backups/$latest_file" "$LOCAL_DIR/backups/$latest_file"
       info "Бэкап сохранен локально в $LOCAL_DIR/backups/$latest_file"
     else
       warn "На сервере не найден SQL-бэкап для скачивания."
     fi
+    if [ -n "${latest_env:-}" ]; then
+      info "Скачиваю последний бэкап env: $latest_env"
+      scp_from_remote "$REMOTE_DIR/backups/$latest_env" "$LOCAL_DIR/backups/$latest_env"
+      info "Бэкап env сохранен локально в $LOCAL_DIR/backups/$latest_env"
+    else
+      warn "На сервере не найден env-бэкап для скачивания."
+    fi
+    ;;
+  restore-db)
+    db_file="${2:-}"
+    if [ -z "${db_file}" ]; then
+      db_file="$(ls -1t "$LOCAL_DIR"/backups/job-scraper-*.sql.gz 2>/dev/null | head -n 1 || true)"
+    fi
+    [ -n "${db_file:-}" ] || err "Укажите путь к SQL-бэкапу или положите его в ./backups"
+    [ -f "$db_file" ] || err "Файл не найден: $db_file"
+    remote_name="$(basename "$db_file")"
+    info "Загружаю SQL-бэкап на сервер: $remote_name"
+    scp_to_remote "$db_file" "$REMOTE_DIR/backups/$remote_name"
+    info "Восстанавливаю БД на сервере..."
+    ssh_cmd "cd $REMOTE_DIR && ./deploy/deploy-local.sh restore-db ./backups/$remote_name"
+    info "Восстановление БД завершено."
+    ;;
+  restore-env)
+    env_file="${2:-}"
+    if [ -z "${env_file}" ]; then
+      env_file="$(ls -1t "$LOCAL_DIR"/backups/env-*.bak 2>/dev/null | head -n 1 || true)"
+    fi
+    [ -n "${env_file:-}" ] || err "Укажите путь к env-бэкапу или положите его в ./backups"
+    [ -f "$env_file" ] || err "Файл не найден: $env_file"
+    remote_name="$(basename "$env_file")"
+    info "Загружаю env-бэкап на сервер: $remote_name"
+    scp_to_remote "$env_file" "$REMOTE_DIR/backups/$remote_name"
+    info "Восстанавливаю .env на сервере..."
+    ssh_cmd "cd $REMOTE_DIR && ./deploy/deploy-local.sh restore-env ./backups/$remote_name"
+    info "Восстановление .env завершено."
+    ;;
+  restore-all)
+    db_file="${2:-}"
+    env_file="${3:-}"
+    if [ -z "${db_file}" ]; then
+      db_file="$(ls -1t "$LOCAL_DIR"/backups/job-scraper-*.sql.gz 2>/dev/null | head -n 1 || true)"
+    fi
+    if [ -z "${env_file}" ]; then
+      env_file="$(ls -1t "$LOCAL_DIR"/backups/env-*.bak 2>/dev/null | head -n 1 || true)"
+    fi
+    [ -n "${db_file:-}" ] || err "Не найден SQL-бэкап для restore-all"
+    [ -n "${env_file:-}" ] || err "Не найден env-бэкап для restore-all"
+    [ -f "$db_file" ] || err "Файл не найден: $db_file"
+    [ -f "$env_file" ] || err "Файл не найден: $env_file"
+    remote_db="$(basename "$db_file")"
+    remote_env="$(basename "$env_file")"
+    info "Загружаю бэкапы на сервер..."
+    scp_to_remote "$db_file" "$REMOTE_DIR/backups/$remote_db"
+    scp_to_remote "$env_file" "$REMOTE_DIR/backups/$remote_env"
+    info "Восстанавливаю .env и БД на сервере..."
+    ssh_cmd "cd $REMOTE_DIR && ./deploy/deploy-local.sh restore-all ./backups/$remote_env ./backups/$remote_db"
+    info "Полное восстановление завершено."
     ;;
   ssh)
     ssh_cmd "cd $REMOTE_DIR && exec \$SHELL"
@@ -121,6 +180,9 @@ case "$cmd" in
     echo "  logs    — логи контейнера с сервера"
     echo "  status  — статус контейнера на сервере"
     echo "  backup  — бэкап БД на сервере + скачать последний локально"
+    echo "  restore-db [file]   — восстановить БД на сервере из локального бэкапа"
+    echo "  restore-env [file]  — восстановить .env на сервере из локального бэкапа"
+    echo "  restore-all [db] [env] — восстановить БД и .env на сервере"
     echo "  ssh     — войти по SSH в каталог проекта на сервере"
     echo ""
     ;;

@@ -43,11 +43,22 @@ load_db_env() {
   DB_USER="${POSTGRES_USER:-scraper}"
   DB_PASSWORD="${POSTGRES_PASSWORD:-scraper_pass}"
   if [ -f "$ENV_FILE" ]; then
-    # shellcheck disable=SC1090
-    source "$ENV_FILE"
-    DB_NAME="${POSTGRES_DB:-$DB_NAME}"
-    DB_USER="${POSTGRES_USER:-$DB_USER}"
-    DB_PASSWORD="${POSTGRES_PASSWORD:-$DB_PASSWORD}"
+    get_env_value() {
+      local key="$1"
+      local val
+      val="$(grep -E "^${key}=" "$ENV_FILE" | tail -n 1 | cut -d'=' -f2- || true)"
+      val="${val%\"}"
+      val="${val#\"}"
+      val="${val%\'}"
+      val="${val#\'}"
+      echo "$val"
+    }
+    DB_NAME="$(get_env_value "POSTGRES_DB" || true)"
+    DB_USER="$(get_env_value "POSTGRES_USER" || true)"
+    DB_PASSWORD="$(get_env_value "POSTGRES_PASSWORD" || true)"
+    DB_NAME="${DB_NAME:-job_scraper}"
+    DB_USER="${DB_USER:-scraper}"
+    DB_PASSWORD="${DB_PASSWORD:-scraper_pass}"
   fi
 }
 
@@ -87,9 +98,46 @@ backup_before_migrate() {
   backup_db
 }
 
+latest_db_backup() {
+  ls -1t "${BACKUP_DIR}"/job-scraper-*.sql.gz 2>/dev/null | head -n 1 || true
+}
+
+latest_env_backup() {
+  ls -1t "${BACKUP_DIR}"/env-*.bak 2>/dev/null | head -n 1 || true
+}
+
 apply_migrations() {
   info "Применение миграций..."
   $COMPOSE run --rm migrate
+}
+
+restore_db() {
+  local backup_file="${1:-}"
+  if [ -z "$backup_file" ]; then
+    backup_file="$(latest_db_backup)"
+  fi
+  [ -n "$backup_file" ] || error "Не найден файл бэкапа БД."
+  [ -f "$backup_file" ] || error "Файл бэкапа БД не существует: $backup_file"
+
+  load_db_env
+  info "Восстановление БД из: $backup_file"
+  $COMPOSE up -d "$POSTGRES_SERVICE"
+  gzip -dc "$backup_file" | $COMPOSE exec -T \
+    -e PGPASSWORD="$DB_PASSWORD" \
+    "$POSTGRES_SERVICE" \
+    sh -lc "psql -U '$DB_USER' -d '$DB_NAME' -v ON_ERROR_STOP=1"
+  info "Восстановление БД завершено."
+}
+
+restore_env() {
+  local env_backup="${1:-}"
+  if [ -z "$env_backup" ]; then
+    env_backup="$(latest_env_backup)"
+  fi
+  [ -n "$env_backup" ] || error "Не найден файл бэкапа .env."
+  [ -f "$env_backup" ] || error "Файл бэкапа .env не существует: $env_backup"
+  cp "$env_backup" "$ENV_FILE"
+  info ".env восстановлен из: $env_backup"
 }
 
 cmd="${1:-help}"
@@ -164,6 +212,20 @@ case "$cmd" in
     info "Ручной бэкап завершен."
     ;;
 
+  restore-db)
+    restore_db "${2:-}"
+    ;;
+
+  restore-env)
+    restore_env "${2:-}"
+    ;;
+
+  restore-all)
+    restore_env "${2:-}"
+    restore_db "${3:-}"
+    info "Восстановление .env и БД завершено."
+    ;;
+
   help|*)
     echo ""
     echo "Использование: ./deploy.sh <команда>"
@@ -176,6 +238,9 @@ case "$cmd" in
     echo "  logs     — показать логи в реальном времени"
     echo "  status   — статус контейнера и использование ресурсов"
     echo "  backup   — ручной бэкап .env и БД"
+    echo "  restore-db [file]        — восстановить БД из бэкапа (или последнего)"
+    echo "  restore-env [file]       — восстановить .env из бэкапа (или последнего)"
+    echo "  restore-all [env] [db]   — восстановить и .env, и БД (или последние)"
     echo ""
     ;;
 esac

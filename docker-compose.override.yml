@@ -1,7 +1,7 @@
 # Overrides for local development — hot-reload source, debug logging
 services:
   scraper:
-    command: ["python", "-m", "src.main", "scrape", "all"]
+    command: ["python", "-m", "src.main", "scheduler"]
     volumes:
       - .:/app          # mount source for live reload
       - /dev/shm:/dev/shm
@@ -10,7 +10,7 @@ services:
       SCRAPER_HEADLESS: "true"
       LOG_LEVEL: DEBUG
       LOG_FORMAT: console
-    restart: "no"       # don't loop in dev
+    restart: "unless-stopped"
 
   debug:
     build: .

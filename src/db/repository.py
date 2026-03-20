@@ -477,6 +477,21 @@ class TelegramUserRepository:
         await self._session.flush()
         return user
 
+    async def list_last_chat_ids_for_usernames(self, usernames: set[str]) -> list[int]:
+        if not usernames:
+            return []
+        normalized = {u.strip().lstrip("@").lower() for u in usernames if u.strip()}
+        if not normalized:
+            return []
+        stmt = (
+            select(TelegramUser.last_chat_id)
+            .where(TelegramUser.last_chat_id.is_not(None))
+            .where(TelegramUser.username.is_not(None))
+            .where(func.lower(TelegramUser.username).in_(tuple(normalized)))
+        )
+        result = await self._session.execute(stmt)
+        return [int(x) for x in result.scalars().all() if x is not None]
+
 
 class TelegramDeliveryRepository:
     """Track already delivered vacancies per subscription."""

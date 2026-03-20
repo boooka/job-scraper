@@ -26,6 +26,13 @@ log = get_logger(__name__)
 
 TRANSLATOR_NAME = "deepl"
 
+# run_pending_translations вызывается из разных мест:
+# - scheduler catch-up job (каждую минуту)
+# - фоновые tasks после каждого flushed batch
+# При перекрытии это может создавать много параллельных DeepL запросов
+# и заметно "размазывать" запуск остальных scheduler-джобов.
+_translation_lock = asyncio.Lock()
+
 
 @dataclass
 class _TranslationJob:
@@ -147,7 +154,10 @@ async def _fetch_untranslated(
     ]
 
 
-async def _translate_jobs(jobs: list[_TranslationJob], language: str) -> list[tuple[_TranslationJob, str, str | None]]:
+async def _translate_jobs(
+    jobs: list[_TranslationJob],
+    language: str,
+) -> list[tuple[_TranslationJob, str, str | None]]:
     """
     Call DeepL for all titles and descriptions in as few requests as possible.
 
@@ -203,52 +213,57 @@ async def run_pending_translations(language: str | None = None) -> dict[str, int
     log.info("translation.start", language=lang, batch_size=batch_size)
 
     # Loop until no untranslated vacancies remain in this run
-    while True:
-        async with get_session() as session:
-            jobs = await _fetch_untranslated(session, lang, batch_size)
+    if _translation_lock.locked():
+        log.info("translation.skip_already_running", language=lang)
+        return summary
 
-        if not jobs:
-            log.info("translation.nothing_pending", language=lang)
-            break
+    async with _translation_lock:
+        while True:
+            async with get_session() as session:
+                jobs = await _fetch_untranslated(session, lang, batch_size)
 
-        log.info("translation.batch", language=lang, count=len(jobs))
+            if not jobs:
+                log.info("translation.nothing_pending", language=lang)
+                break
 
-        try:
-            results = await _translate_jobs(jobs, lang)
-        except Exception as exc:
-            log.error("translation.batch_failed", language=lang, error=str(exc))
-            summary["failed"] += len(jobs)
-            break  # Stop on DeepL error to avoid quota waste
+            log.info("translation.batch", language=lang, count=len(jobs))
 
-        # Persist translations
-        async with get_session() as session:
-            repo = TranslationRepository(session)
-            for job, title_ru, desc_ru in results:
-                try:
-                    await repo.upsert(
-                        vacancy_id=job.vacancy_id,
-                        language=lang,
-                        title_translated=title_ru,
-                        description_translated=desc_ru,
-                        translator=TRANSLATOR_NAME,
-                    )
-                    summary["translated"] += 1
-                except Exception as exc:
-                    log.warning(
-                        "translation.save_failed",
-                        vacancy_id=str(job.vacancy_id),
-                        error=str(exc),
-                    )
-                    summary["failed"] += 1
+            try:
+                results = await _translate_jobs(jobs, lang)
+            except Exception as exc:
+                log.error("translation.batch_failed", language=lang, error=str(exc))
+                summary["failed"] += len(jobs)
+                break  # Stop on DeepL error to avoid quota waste
 
-        log.info("translation.batch_done", **summary)
+            # Persist translations
+            async with get_session() as session:
+                repo = TranslationRepository(session)
+                for job, title_ru, desc_ru in results:
+                    try:
+                        await repo.upsert(
+                            vacancy_id=job.vacancy_id,
+                            language=lang,
+                            title_translated=title_ru,
+                            description_translated=desc_ru,
+                            translator=TRANSLATOR_NAME,
+                        )
+                        summary["translated"] += 1
+                    except Exception as exc:
+                        log.warning(
+                            "translation.save_failed",
+                            vacancy_id=str(job.vacancy_id),
+                            error=str(exc),
+                        )
+                        summary["failed"] += 1
 
-        # If we got fewer than batch_size — no more to process
-        if len(jobs) < batch_size:
-            break
+            log.info("translation.batch_done", **summary)
 
-        if settings.deepl_delay_ms:
-            await asyncio.sleep(settings.deepl_delay_ms / 1000)
+            # If we got fewer than batch_size — no more to process
+            if len(jobs) < batch_size:
+                break
+
+            if settings.deepl_delay_ms:
+                await asyncio.sleep(settings.deepl_delay_ms / 1000)
 
     log.info("translation.complete", language=lang, **summary)
     return summary

@@ -2,24 +2,27 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from zoneinfo import ZoneInfo
 
 from src.config import settings
 from src.logger import get_logger
+from src.scrapers.cv import CVScraper
 from src.scrapers.cvbankas import CVBankasScraper
 from src.scrapers.cvmarket import CVMarketScraper
 from src.scrapers.cvonline import CVOnlineScraper
-from src.scrapers.cv import CVScraper   
-
-from src.services.scrape_service import run_scrape
 from src.services.metrics_exporter import dump_metrics_to_disk
+from src.services.scrape_service import run_scrape
 from src.services.subscription_notifier import run_subscription_notifications
 from src.services.translation_service import run_pending_translations
 
 log = get_logger(__name__)
+
+_TZ = "Europe/Vilnius"
 
 
 def _parse_cron(expr: str) -> CronTrigger:
@@ -31,11 +34,12 @@ def _parse_cron(expr: str) -> CronTrigger:
         day=day,
         month=month,
         day_of_week=dow,
+        timezone=_TZ,
     )
 
 
 def create_scheduler() -> AsyncIOScheduler:
-    scheduler = AsyncIOScheduler(timezone="Europe/Vilnius")
+    scheduler = AsyncIOScheduler(timezone=_TZ)
 
     scheduler.add_job(
         run_scrape,
@@ -115,8 +119,20 @@ def create_scheduler() -> AsyncIOScheduler:
 async def run_scheduler() -> None:
     """Start scheduler and keep running."""
     scheduler = create_scheduler()
+
+    # Логируем ближайшие next_run_time, чтобы было с чем сравнить `scrape_runs.started_at`
+    now = datetime.now(tz=ZoneInfo(_TZ))
+    jobs = scheduler.get_jobs()
+    next_runs: dict[str, str | None] = {}
+    for job in jobs:
+        try:
+            nxt = job.trigger.get_next_fire_time(None, now)  # type: ignore[attr-defined]
+        except Exception:
+            nxt = None
+        next_runs[job.id] = nxt.isoformat() if nxt else None
+
     scheduler.start()
-    log.info("scheduler.started", jobs=[j.id for j in scheduler.get_jobs()])
+    log.info("scheduler.started", jobs=[j.id for j in jobs], next_runs=next_runs)
 
     try:
         while True:

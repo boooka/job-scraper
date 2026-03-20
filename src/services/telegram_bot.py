@@ -66,7 +66,8 @@ class TelegramDebugMiddleware(BaseMiddleware):
 
 class TelegramBotService:
     BTN_SEARCH = "🔎 Поиск вакансий"
-    BTN_CONTEXT_SEARCH = "🧩 Контекстный поиск"
+    BTN_CONTEXT_SEARCH = "🧩 Фильтры"
+    BTN_HELP = "❓ Помощь"
     BTN_SUBSCRIBE = "⭐ Подписаться на поиск"
     BTN_SUBSCRIPTIONS = "📋 Мои подписки"
     BTN_UNSUBSCRIBE = "❌ Отписаться"
@@ -188,6 +189,7 @@ class TelegramBotService:
             [KeyboardButton(text=self.BTN_SUBSCRIBE), KeyboardButton(text=self.BTN_SUBSCRIPTIONS)],
             [KeyboardButton(text=self.BTN_UNSUBSCRIBE)],
         ]
+        rows.append([KeyboardButton(text=self.BTN_HELP)])
         if is_admin:
             rows.append([KeyboardButton(text=self.BTN_ADMIN_SUBS), KeyboardButton(text=self.BTN_ADMIN_STATS)])
         return ReplyKeyboardMarkup(
@@ -272,10 +274,22 @@ class TelegramBotService:
             ]
         )
 
-    async def _open_context_menu(self, message: Message) -> None:
-        if message.from_user is None:
-            return
-        ctx = self._get_context(message.from_user.id)
+    @staticmethod
+    def _help_inline_keyboard() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🗣 Обратная связь", callback_data="help:feedback")],
+                [InlineKeyboardButton(text="❓ Помочь", callback_data="help:help")],
+            ]
+        )
+
+    async def _open_context_menu(self, message: Message, *, user_id: int | None = None) -> None:
+        effective_user_id = user_id
+        if effective_user_id is None:
+            if message.from_user is None:
+                return
+            effective_user_id = message.from_user.id
+        ctx = self._get_context(effective_user_id)
         await self._send_text(
             message.chat.id,
             TelegramMessages.context_summary(
@@ -289,17 +303,29 @@ class TelegramBotService:
             reply_markup=self._context_menu_keyboard(bool(ctx["auto_search"])),
         )
 
-    async def _run_context_search(self, message: Message) -> None:
-        if message.from_user is None:
+    async def _is_admin_user(self, chat_id: int, user: User) -> bool:
+        username = (user.username or "").lower()
+        if username and username in self._admin_usernames:
+            return True
+        try:
+            member = await self.bot.get_chat_member(chat_id, user.id)
+            return member.status in {"administrator", "creator"}
+        except Exception as exc:
+            self._tg_debug("telegram.get_chat_member_failed", {"error": str(exc)})
+            return False
+
+    async def _run_context_search(self, message: Message, *, user: User | None = None) -> None:
+        effective_user = user or message.from_user
+        if effective_user is None:
             return
-        ctx = self._get_context(message.from_user.id)
+        ctx = self._get_context(effective_user.id)
         query = str(ctx["query"] or "").strip()
         parsed = parse_search_query(query) if query else parse_search_query("")
         published_from: datetime | None = None
         if ctx["date_days"]:
             published_from = datetime.now(timezone.utc) - timedelta(days=int(ctx["date_days"]))
         started = time.perf_counter()
-        is_admin = await self._is_admin(message)
+        is_admin = await self._is_admin_user(message.chat.id, effective_user)
         async with get_session() as session:
             repo = VacancySearchRepository(session)
             rows = await repo.search(
@@ -568,6 +594,22 @@ class TelegramBotService:
                 callback.message.chat.id if callback.message else None,
             )
             data = callback.data or ""
+            if data.startswith("help:"):
+                if callback.message is None or callback.from_user is None:
+                    await callback.answer()
+                    return
+                user_id = callback.from_user.id
+                if data == "help:help":
+                    await self._send_text(callback.message.chat.id, TelegramMessages.help_text())
+                    await callback.answer()
+                    return
+                if data == "help:feedback":
+                    self._pending_user_action[user_id] = "feedback"
+                    await self._send_text(
+                        callback.message.chat.id, TelegramMessages.FEEDBACK_PROMPT, markdown=False
+                    )
+                    await callback.answer()
+                    return
             if data.startswith("ctx:"):
                 if callback.message is None or callback.from_user is None:
                     await callback.answer()
@@ -613,17 +655,17 @@ class TelegramBotService:
                         if 0 <= idx < len(choices):
                             ctx["history"].append(("location", ctx["location"]))
                             ctx["location"] = choices[idx]
-                            await self._open_context_menu(callback.message)
+                            await self._open_context_menu(callback.message, user_id=user_id)
                             if ctx["auto_search"]:
-                                await self._run_context_search(callback.message)
+                                await self._run_context_search(callback.message, user=callback.from_user)
                     await callback.answer()
                     return
                 if data == "ctx:set:date7":
                     ctx["history"].append(("date_days", ctx["date_days"]))
                     ctx["date_days"] = 7
-                    await self._open_context_menu(callback.message)
+                    await self._open_context_menu(callback.message, user_id=user_id)
                     if ctx["auto_search"]:
-                        await self._run_context_search(callback.message)
+                        await self._run_context_search(callback.message, user=callback.from_user)
                     await callback.answer("Фильтр даты применен")
                     return
                 if data == "ctx:set:salary":
@@ -673,9 +715,9 @@ class TelegramBotService:
                     if amount.isdigit():
                         ctx["history"].append(("salary_from", ctx["salary_from"]))
                         ctx["salary_from"] = int(amount)
-                        await self._open_context_menu(callback.message)
+                        await self._open_context_menu(callback.message, user_id=user_id)
                         if ctx["auto_search"]:
-                            await self._run_context_search(callback.message)
+                            await self._run_context_search(callback.message, user=callback.from_user)
                     await callback.answer()
                     return
                 if data.startswith("ctx:salary_to:"):
@@ -683,9 +725,9 @@ class TelegramBotService:
                     if amount.isdigit():
                         ctx["history"].append(("salary_to", ctx["salary_to"]))
                         ctx["salary_to"] = int(amount)
-                        await self._open_context_menu(callback.message)
+                        await self._open_context_menu(callback.message, user_id=user_id)
                         if ctx["auto_search"]:
-                            await self._run_context_search(callback.message)
+                            await self._run_context_search(callback.message, user=callback.from_user)
                     await callback.answer()
                     return
                 if data == "ctx:salary:input_from":
@@ -705,7 +747,7 @@ class TelegramBotService:
                     return
                 if data == "ctx:auto":
                     ctx["auto_search"] = not bool(ctx["auto_search"])
-                    await self._open_context_menu(callback.message)
+                    await self._open_context_menu(callback.message, user_id=user_id)
                     await callback.answer()
                     return
                 if data == "ctx:undo":
@@ -714,16 +756,16 @@ class TelegramBotService:
                         return
                     field, old_value = ctx["history"].pop()
                     ctx[field] = old_value
-                    await self._open_context_menu(callback.message)
+                    await self._open_context_menu(callback.message, user_id=user_id)
                     await callback.answer()
                     return
                 if data == "ctx:clear":
                     self._search_context_by_user[user_id] = self._new_context()
-                    await self._open_context_menu(callback.message)
+                    await self._open_context_menu(callback.message, user_id=user_id)
                     await callback.answer(TelegramMessages.CONTEXT_RESET)
                     return
                 if data == "ctx:run":
-                    await self._run_context_search(callback.message)
+                    await self._run_context_search(callback.message, user=callback.from_user)
                     await callback.answer()
                     return
             if data.startswith("s_next:") or data.startswith("s_all:"):
@@ -796,6 +838,14 @@ class TelegramBotService:
             if message.text == self.BTN_CONTEXT_SEARCH:
                 await self._open_context_menu(message)
                 return
+            if message.text == self.BTN_HELP:
+                await self._send_text(
+                    message.chat.id,
+                    TelegramMessages.HELP_MENU_TITLE,
+                    reply_markup=self._help_inline_keyboard(),
+                    markdown=False,
+                )
+                return
             if message.text == self.BTN_SUBSCRIBE:
                 self._pending_user_action[message.from_user.id] = "subscribe"
                 await self._send_text(message.chat.id, TelegramMessages.ASK_SUBSCRIBE_QUERY)
@@ -826,6 +876,28 @@ class TelegramBotService:
                     await self._send_text(message.chat.id, TelegramMessages.subscription_cancelled(ok))
                 else:
                     await self._send_text(message.chat.id, "Нужен числовой ID подписки.")
+            elif action == "feedback":
+                if message.from_user is None:
+                    return
+                feedback_text = (message.text or "").strip()
+                if not feedback_text:
+                    await self._send_text(message.chat.id, TelegramMessages.FEEDBACK_PROMPT)
+                    return
+                username = message.from_user.username
+                user_display = f"@{username}" if username else f"id={message.from_user.id}"
+                ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                report = (
+                    "📝 Обратная связь\n"
+                    f"От: {user_display}\n"
+                    f"Время: {ts}\n\n"
+                    f"{feedback_text}"
+                )
+                async with get_session() as session:
+                    repo = TelegramUserRepository(session)
+                    admin_chat_ids = await repo.list_last_chat_ids_for_usernames(self._admin_usernames)
+                for chat_id in admin_chat_ids:
+                    await self._send_text(chat_id, report, markdown=False)
+                await self._send_text(message.chat.id, TelegramMessages.FEEDBACK_SENT)
             elif action == "ctx_query":
                 ctx = self._get_context(message.from_user.id)
                 ctx["history"].append(("query", ctx["query"]))
