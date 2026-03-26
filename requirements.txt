@@ -51,7 +51,7 @@ python-apt==2.7.7+ubuntu5.2
 python-dotenv==1.0.1
 pytz==2024.1
 PyYAML==6.0.1
-requests==2.31.0
+requests==2.33.0
 rich==13.7.1
 service-identity==24.1.0
 setuptools==68.1.2
