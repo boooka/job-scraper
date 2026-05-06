@@ -58,7 +58,7 @@ setuptools==68.1.2
 six==1.16.0
 systemd-python==235
 texttable==1.6.7
-Twisted==24.3.0
+Twisted==26.4.0rc2
 typing_extensions==4.10.0
 ubuntu-pro-client==8001
 unattended-upgrades==0.1
