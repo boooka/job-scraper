@@ -8,6 +8,7 @@ a Russian ``name_translated``.
 Matching is diacritic- and case-insensitive, so "Klaipėda" / "Klaipeda" /
 "KLAIPEDA" all resolve to the same entry.
 """
+
 from __future__ import annotations
 
 import unicodedata

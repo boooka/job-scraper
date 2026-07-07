@@ -4,6 +4,7 @@ Runs once a day from the scheduler: aggregates how many vacancies were added
 (per source and total) and translated in the last window, and alerts admins if
 no new vacancies appeared — a strong signal a scraper broke.
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta

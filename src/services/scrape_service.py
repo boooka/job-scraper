@@ -1,4 +1,5 @@
 """Orchestration: run scraper → persist in batches → track changes → translate."""
+
 from __future__ import annotations
 
 import asyncio
@@ -54,6 +55,7 @@ async def _run_translations_bg() -> None:
     """Run translations in background — errors are logged, never propagated."""
     try:
         from src.services.translation_service import run_pending_translations
+
         await run_pending_translations()
     except Exception as exc:
         log.error("translation.bg_failed", error=str(exc))

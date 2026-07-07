@@ -1,4 +1,5 @@
 """Persist runtime metrics to disk as JSONL snapshots."""
+
 from __future__ import annotations
 
 import json

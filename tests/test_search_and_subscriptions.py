@@ -113,9 +113,7 @@ async def test_unsubscribe_marks_inactive_and_keeps_row(db_session):
     ok = await repo.cancel_for_user(sub.id, 42)
     assert ok is True
 
-    row = (
-        await db_session.execute(select(type(sub)).where(type(sub).id == sub.id))
-    ).scalar_one()
+    row = (await db_session.execute(select(type(sub)).where(type(sub).id == sub.id))).scalar_one()
     assert row.is_active is False
     assert row.cancelled_at is not None
     active_rows = await repo.list_active_for_user(42)
@@ -158,10 +156,12 @@ async def test_telegram_user_upsert_tracks_last_seen(db_session):
 async def test_daily_report_counts_and_stale_flag(db_session):
     v_repo = VacancyRepository(db_session)
     # Two fresh vacancies from different sources
-    await v_repo.upsert_vacancy(_vacancy(source="cvbankas", external_id="d1",
-                                         url="https://example.com/d1"))
-    await v_repo.upsert_vacancy(_vacancy(source="cv", external_id="d2",
-                                         url="https://example.com/d2"))
+    await v_repo.upsert_vacancy(
+        _vacancy(source="cvbankas", external_id="d1", url="https://example.com/d1")
+    )
+    await v_repo.upsert_vacancy(
+        _vacancy(source="cv", external_id="d2", url="https://example.com/d2")
+    )
 
     stats_repo = StatsRepository(db_session)
     since = datetime.now(UTC) - timedelta(hours=24)
@@ -195,9 +195,7 @@ async def test_upsert_skips_blank_external_id_and_rootlike_url(db_session):
     assert changes == []
 
     # URL that fell back to the site root (no path) → skip
-    action, _ = await v_repo.upsert_vacancy(
-        _vacancy(external_id="42", url="https://cvonline.lt")
-    )
+    action, _ = await v_repo.upsert_vacancy(_vacancy(external_id="42", url="https://cvonline.lt"))
     assert action == "skipped"
 
     # Nothing was written for either
@@ -209,8 +207,11 @@ async def test_upsert_skips_blank_external_id_and_rootlike_url(db_session):
 async def test_rootlike_url_does_not_overwrite_existing_good_row(db_session):
     v_repo = VacancyRepository(db_session)
     action, _ = await v_repo.upsert_vacancy(
-        _vacancy(external_id="777", title="Good title",
-                 url="https://cvonline.lt/vacancy/777/company/good")
+        _vacancy(
+            external_id="777",
+            title="Good title",
+            url="https://cvonline.lt/vacancy/777/company/good",
+        )
     )
     assert action == "created"
 
@@ -239,14 +240,18 @@ async def test_city_get_or_create_is_idempotent_and_cached(db_session):
     # Translation is backfilled onto the existing row
     assert second.name_translated == "Вильнюс"
 
-    cities = (await db_session.execute(select(City).where(City.name_en == "Vilnius"))).scalars().all()
+    cities = (
+        (await db_session.execute(select(City).where(City.name_en == "Vilnius"))).scalars().all()
+    )
     assert len(cities) == 1
 
     # A fresh repo (new batch) must also find the existing row, not insert again
     repo2 = CityRepository(db_session)
     again = await repo2.get_or_create("Vilnius", None)
     assert again.id == first.id
-    cities = (await db_session.execute(select(City).where(City.name_en == "Vilnius"))).scalars().all()
+    cities = (
+        (await db_session.execute(select(City).where(City.name_en == "Vilnius"))).scalars().all()
+    )
     assert len(cities) == 1
 
 
@@ -368,16 +373,18 @@ async def test_location_and_salary_suggestions_from_db(db_session):
 
 @pytest.mark.asyncio
 async def test_city_normalisation_unifies_spellings(db_session):
-    """"Vilnius" (LT) and "Вильнюс" (RU) resolve to one city; display uses RU."""
+    """ "Vilnius" (LT) and "Вильнюс" (RU) resolve to one city; display uses RU."""
     from sqlalchemy.orm import selectinload
 
     from src.models.orm import City
 
     v_repo = VacancyRepository(db_session)
-    await v_repo.upsert_vacancy(_vacancy(external_id="lt", location="Vilnius",
-                                         url="https://example.com/lt"))
-    await v_repo.upsert_vacancy(_vacancy(external_id="ru", location="Вильнюс",
-                                         url="https://example.com/ru"))
+    await v_repo.upsert_vacancy(
+        _vacancy(external_id="lt", location="Vilnius", url="https://example.com/lt")
+    )
+    await v_repo.upsert_vacancy(
+        _vacancy(external_id="ru", location="Вильнюс", url="https://example.com/ru")
+    )
 
     cities = (await db_session.execute(select(City))).scalars().all()
     vilnius = [c for c in cities if c.name_en == "Vilnius"]
@@ -385,12 +392,16 @@ async def test_city_normalisation_unifies_spellings(db_session):
     assert vilnius[0].name_translated == "Вильнюс"
 
     rows = (
-        await db_session.execute(
-            select(Vacancy)
-            .options(selectinload(Vacancy.city))
-            .where(Vacancy.external_id.in_(("lt", "ru")))
+        (
+            await db_session.execute(
+                select(Vacancy)
+                .options(selectinload(Vacancy.city))
+                .where(Vacancy.external_id.in_(("lt", "ru")))
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert len(rows) == 2
     assert {r.city_id for r in rows} == {vilnius[0].id}
     # Display prefers the translation regardless of the scraped spelling
@@ -401,13 +412,22 @@ async def test_city_normalisation_unifies_spellings(db_session):
 async def test_city_search_filter_cross_language(db_session):
     """A location filter typed in either language matches the same vacancies."""
     v_repo = VacancyRepository(db_session)
-    await v_repo.upsert_vacancy(_vacancy(external_id="c1", location="Kaunas",
-                                         title="Rust engineer", url="https://example.com/c1"))
+    await v_repo.upsert_vacancy(
+        _vacancy(
+            external_id="c1", location="Kaunas", title="Rust engineer", url="https://example.com/c1"
+        )
+    )
     s_repo = VacancySearchRepository(db_session)
 
     for term in ("Kaunas", "Каунас"):
         rows = await s_repo.search(
-            includes=[], excludes=[], fuzzy=[], regex=None,
-            language="RU", limit=10, is_admin=False, location=term,
+            includes=[],
+            excludes=[],
+            fuzzy=[],
+            regex=None,
+            language="RU",
+            limit=10,
+            is_admin=False,
+            location=term,
         )
         assert any(r.external_id == "c1" for r in rows), term

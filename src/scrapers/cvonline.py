@@ -1,4 +1,5 @@
 """Scraper for cvonline.lt (Russian interface)."""
+
 from __future__ import annotations
 
 import re
@@ -84,9 +85,7 @@ class CVOnlineScraper(BaseScraper):
         title = (await link_el.inner_text()).strip()
 
         # Company — the employer link (distinct from the locations column)
-        company_el = await item.query_selector(
-            "a[data-testid^='vacancy-item-link-employer']"
-        )
+        company_el = await item.query_selector("a[data-testid^='vacancy-item-link-employer']")
         company = (await company_el.inner_text()).strip() if company_el else None
 
         # Location — "Литва / Удаленный" → location + kind

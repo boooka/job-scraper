@@ -1,4 +1,5 @@
 """Send new vacancies to Telegram subscribers with dedup delivery log."""
+
 from __future__ import annotations
 
 from src.config import settings
@@ -25,7 +26,9 @@ async def run_subscription_notifications() -> dict[str, int]:
     Send only new (not yet delivered) matches to all active subscriptions.
     """
     if not settings.telegram_bot_token:
-        log.warning("subscription_notifications.skipped", reason="TELEGRAM_BOT_TOKEN not configured")
+        log.warning(
+            "subscription_notifications.skipped", reason="TELEGRAM_BOT_TOKEN not configured"
+        )
         return {"subscriptions": 0, "sent": 0, "errors": 0}
 
     sent = 0
@@ -33,6 +36,7 @@ async def run_subscription_notifications() -> dict[str, int]:
     errors = 0
     subs: list = []
     from src.services.telegram_bot import TelegramBotService
+
     bot = TelegramBotService()
 
     try:

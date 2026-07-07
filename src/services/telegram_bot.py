@@ -1,4 +1,5 @@
 """Telegram bot implemented with aiogram."""
+
 from __future__ import annotations
 
 import json
@@ -119,12 +120,34 @@ class TelegramBotService:
     def _tg_debug(self, event: str, payload: dict[str, Any]) -> None:
         if not settings.telegram_debug_logging:
             return
-        self._debug_logger.debug("%s %s", event, json.dumps(payload, ensure_ascii=False, default=str))
+        self._debug_logger.debug(
+            "%s %s", event, json.dumps(payload, ensure_ascii=False, default=str)
+        )
 
     @staticmethod
     def _escape_md(text: str) -> str:
         escaped = text
-        for ch in ("\\", "_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"):
+        for ch in (
+            "\\",
+            "_",
+            "*",
+            "[",
+            "]",
+            "(",
+            ")",
+            "~",
+            "`",
+            ">",
+            "#",
+            "+",
+            "-",
+            "=",
+            "|",
+            "{",
+            "}",
+            ".",
+            "!",
+        ):
             escaped = escaped.replace(ch, f"\\{ch}")
         return escaped
 
@@ -201,7 +224,12 @@ class TelegramBotService:
         ]
         rows.append([KeyboardButton(text=self.BTN_HELP)])
         if is_admin:
-            rows.append([KeyboardButton(text=self.BTN_ADMIN_SUBS), KeyboardButton(text=self.BTN_ADMIN_STATS)])
+            rows.append(
+                [
+                    KeyboardButton(text=self.BTN_ADMIN_SUBS),
+                    KeyboardButton(text=self.BTN_ADMIN_STATS),
+                ]
+            )
         return ReplyKeyboardMarkup(
             keyboard=rows,
             resize_keyboard=True,
@@ -497,7 +525,11 @@ class TelegramBotService:
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text="Открыть вакансию", url=url)],
-                    [InlineKeyboardButton(text="Подписаться на этот запрос", callback_data=f"subq:{token}")],
+                    [
+                        InlineKeyboardButton(
+                            text="Подписаться на этот запрос", callback_data=f"subq:{token}"
+                        )
+                    ],
                 ]
             )
             await self._send_text(chat_id, card, markdown=True, reply_markup=keyboard)
@@ -514,10 +546,14 @@ class TelegramBotService:
                     )
                 ]
             )
-        rows.append([InlineKeyboardButton(text="Показать все", callback_data=f"s_all:{session_token}")])
+        rows.append(
+            [InlineKeyboardButton(text="Показать все", callback_data=f"s_all:{session_token}")]
+        )
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
-    async def _notify_new_subscription(self, user: User | None, sub_id: int, query_raw: str) -> None:
+    async def _notify_new_subscription(
+        self, user: User | None, sub_id: int, query_raw: str
+    ) -> None:
         """Alert admins when a (non-admin) user creates a subscription."""
         if not settings.admin_notify_new_subscriptions or user is None:
             return
@@ -649,7 +685,10 @@ class TelegramBotService:
             lines.extend(
                 ["- (empty)"]
                 if not top
-                else [f"- {latency:.2f} ms | {(query[:80] + ('...' if len(query) > 80 else ''))}" for query, latency in top]
+                else [
+                    f"- {latency:.2f} ms | {(query[:80] + ('...' if len(query) > 80 else ''))}"
+                    for query, latency in top
+                ]
             )
             await self._send_text(message.chat.id, "\n".join(lines))
 
@@ -684,7 +723,9 @@ class TelegramBotService:
                 ctx = self._get_context(user_id)
                 if data == "ctx:set:query":
                     self._pending_user_action[user_id] = "ctx_query"
-                    await self._send_text(callback.message.chat.id, TelegramMessages.ASK_CONTEXT_QUERY)
+                    await self._send_text(
+                        callback.message.chat.id, TelegramMessages.ASK_CONTEXT_QUERY
+                    )
                     await callback.answer()
                     return
                 if data == "ctx:set:location":
@@ -723,7 +764,9 @@ class TelegramBotService:
                             ctx["location"] = choices[idx]
                             await self._open_context_menu(callback.message, user_id=user_id)
                             if ctx["auto_search"]:
-                                await self._run_context_search(callback.message, user=callback.from_user)
+                                await self._run_context_search(
+                                    callback.message, user=callback.from_user
+                                )
                     await callback.answer()
                     return
                 if data == "ctx:set:date7":
@@ -783,7 +826,9 @@ class TelegramBotService:
                         ctx["salary_from"] = int(amount)
                         await self._open_context_menu(callback.message, user_id=user_id)
                         if ctx["auto_search"]:
-                            await self._run_context_search(callback.message, user=callback.from_user)
+                            await self._run_context_search(
+                                callback.message, user=callback.from_user
+                            )
                     await callback.answer()
                     return
                 if data.startswith("ctx:salary_to:"):
@@ -793,22 +838,30 @@ class TelegramBotService:
                         ctx["salary_to"] = int(amount)
                         await self._open_context_menu(callback.message, user_id=user_id)
                         if ctx["auto_search"]:
-                            await self._run_context_search(callback.message, user=callback.from_user)
+                            await self._run_context_search(
+                                callback.message, user=callback.from_user
+                            )
                     await callback.answer()
                     return
                 if data == "ctx:salary:input_from":
                     self._pending_user_action[user_id] = "ctx_salary_from"
-                    await self._send_text(callback.message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_FROM)
+                    await self._send_text(
+                        callback.message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_FROM
+                    )
                     await callback.answer()
                     return
                 if data == "ctx:salary:input_to":
                     self._pending_user_action[user_id] = "ctx_salary_to"
-                    await self._send_text(callback.message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_TO)
+                    await self._send_text(
+                        callback.message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_TO
+                    )
                     await callback.answer()
                     return
                 if data == "ctx:salary:input_range":
                     self._pending_user_action[user_id] = "ctx_salary_range"
-                    await self._send_text(callback.message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_RANGE)
+                    await self._send_text(
+                        callback.message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_RANGE
+                    )
                     await callback.answer()
                     return
                 if data == "ctx:auto":
@@ -939,8 +992,12 @@ class TelegramBotService:
                 if message.text.strip().isdigit():
                     async with get_session() as session:
                         repo = TelegramSubscriptionRepository(session)
-                        ok = await repo.cancel_for_user(int(message.text.strip()), message.from_user.id)
-                    await self._send_text(message.chat.id, TelegramMessages.subscription_cancelled(ok))
+                        ok = await repo.cancel_for_user(
+                            int(message.text.strip()), message.from_user.id
+                        )
+                    await self._send_text(
+                        message.chat.id, TelegramMessages.subscription_cancelled(ok)
+                    )
                 else:
                     await self._send_text(message.chat.id, "Нужен числовой ID подписки.")
             elif action == "feedback":
@@ -961,7 +1018,9 @@ class TelegramBotService:
                 )
                 async with get_session() as session:
                     repo = TelegramUserRepository(session)
-                    admin_chat_ids = await repo.list_last_chat_ids_for_usernames(self._admin_usernames)
+                    admin_chat_ids = await repo.list_last_chat_ids_for_usernames(
+                        self._admin_usernames
+                    )
                 for chat_id in admin_chat_ids:
                     await self._send_text(chat_id, report, markdown=False)
                 await self._send_text(message.chat.id, TelegramMessages.FEEDBACK_SENT)
@@ -1015,7 +1074,9 @@ class TelegramBotService:
                     if ctx["auto_search"]:
                         await self._run_context_search(message)
                 else:
-                    await self._send_text(message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_RANGE)
+                    await self._send_text(
+                        message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_RANGE
+                    )
 
     async def run(self) -> None:
         log.info("telegram.bot_started", framework="aiogram")

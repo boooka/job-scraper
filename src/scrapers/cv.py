@@ -1,4 +1,5 @@
 """Scraper for cv.lt (Lithuanian interface)."""
+
 from __future__ import annotations
 
 import re

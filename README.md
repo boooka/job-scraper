@@ -7,38 +7,46 @@ health reports to admins.
 
 ## Stack
 
-| Layer | Technology |
-|-------|-----------|
-| Browser automation | Playwright (Chromium) |
-| Async runtime | asyncio |
-| Scheduler | APScheduler 3 (cron) |
-| ORM | SQLAlchemy 2 (async) |
-| Database | PostgreSQL 16 |
-| Migrations | Alembic |
-| Validation | Pydantic v2 |
-| Translation | DeepL API (+ local cache) |
-| Telegram bot | aiogram 3 |
-| Admin panel | Django 5 (unmanaged models over the Alembic schema) |
-| Retries | Tenacity |
-| Logging | structlog (JSON) |
-| Packaging | Poetry |
-| Lint / format | Ruff + Black (enforced via pre-commit) |
+
+| Layer              | Technology                                          |
+| ------------------ | --------------------------------------------------- |
+| Browser automation | Playwright (Chromium)                               |
+| Async runtime      | asyncio                                             |
+| Scheduler          | APScheduler 3 (cron)                                |
+| ORM                | SQLAlchemy 2 (async)                                |
+| Database           | PostgreSQL 16                                       |
+| Migrations         | Alembic                                             |
+| Validation         | Pydantic v2                                         |
+| Translation        | DeepL API (+ local cache)                           |
+| Telegram bot       | aiogram 3                                           |
+| Admin panel        | Django 5 (unmanaged models over the Alembic schema) |
+| Retries            | Tenacity                                            |
+| Logging            | structlog (JSON)                                    |
+| Packaging          | Poetry                                              |
+| Lint / format      | Ruff + Black (enforced via pre-commit)              |
+
+
+
 
 ## What it does
 
 1. **Scrapes** four job boards on a cron schedule (Playwright).
 2. **Upserts** vacancies, resolving each to a **company** and a normalized
-   **city** (so "Вильнюс" and "Vilnius" are one place).
+  **city** (so "Вильнюс" and "Vilnius" are one place).
 3. **Tracks changes** field-by-field and **deactivates** vacancies that vanish
-   from a source.
+  from a source.
 4. **Translates** new vacancies to Russian via DeepL (cached).
 5. **Serves a Telegram bot**: full-text search (RU + original), filters,
-   subscriptions with de-duplicated delivery.
+  subscriptions with de-duplicated delivery.
 6. **Notifies admins**: a daily health report plus alerts on new users and new
-   subscribers.
+  subscribers.
 7. **Exposes a Django admin** for browsing/editing the data.
 
+
+
 ## Quick Start
+
+
 
 ### 1. Clone & configure
 
@@ -49,6 +57,8 @@ cp .env.example .env
 # edit .env — DATABASE_URL, TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_USERNAMES,
 #             DEEPL_API_KEY, schedules
 ```
+
+
 
 ### 2. Run with Docker Compose
 
@@ -72,6 +82,8 @@ docker compose --profile dev up -d pgadmin
 > `scraper`, `bot`, `migrate` and `admin` containers, so code changes apply on
 > `docker compose up -d <service>` without an image rebuild.
 
+
+
 ### 3. Local development (without Docker)
 
 ```bash
@@ -84,16 +96,22 @@ poetry run python -m src.main scrape cvbankas   # one-off scrape
 poetry run python -m src.main scheduler         # run the scheduler
 ```
 
+
+
 ## CLI (`python -m src.main <command>`)
 
-| Command | Purpose |
-|---------|---------|
-| `scheduler` | Run APScheduler with all scrape/translate/notify jobs (default) |
-| `scrape [cvbankas\|cvonline\|cvmarket\|cv\|all]` | One-off scrape of a source |
-| `bot` | Run the Telegram bot (long-polling) |
-| `migrate` | Create tables from ORM metadata (dev; prefer Alembic in prod) |
-| `backfill-cities` | Resolve every vacancy's raw location into the `cities` dictionary (idempotent) |
-| `daily-report` | Build and send the daily admin health report now |
+
+| Command                                      | Purpose                                                                        |
+| -------------------------------------------- | ------------------------------------------------------------------------------ |
+| `scheduler`                                  | Run APScheduler with all scrape/translate/notify jobs (default)                |
+| `scrape [cvbankas|cvonline|cvmarket|cv|all]` | One-off scrape of a source                                                     |
+| `bot`                                        | Run the Telegram bot (long-polling)                                            |
+| `migrate`                                    | Create tables from ORM metadata (dev; prefer Alembic in prod)                  |
+| `backfill-cities`                            | Resolve every vacancy's raw location into the `cities` dictionary (idempotent) |
+| `daily-report`                               | Build and send the daily admin health report now                               |
+
+
+
 
 ## Project Structure
 
@@ -131,18 +149,22 @@ migrations/versions/            # Alembic revisions (0001 … 0007_cities)
 tests/                          # pytest (async, sqlite in-memory)
 ```
 
+
+
 ## Data Model Highlights
 
 - **Vacancy** — scraped listing. Keeps the raw `location` string plus a FK to a
-  normalized `city`; `display_location` prefers the city's translation.
+normalized `city`; `display_location` prefers the city's translation.
 - **Company** — deduped per `(source, external_id)` (synthetic id from name when
-  the site has none).
+the site has none).
 - **City** — canonical `name_en` (always set) + optional `name_translated` (RU).
-  See [`city_normalizer.py`](src/services/city_normalizer.py); different
-  spellings resolve to one row (diacritic- and case-insensitive).
+See [city_normalizer.py](src/services/city_normalizer.py); different
+spellings resolve to one row (diacritic- and case-insensitive).
 - **VacancyTranslation / TranslationCache** — RU translations and a canonical
-  text cache.
+text cache.
 - **ScrapeRun / VacancyChange** — run log and field-level audit trail.
+
+
 
 ### Integrity guard
 
@@ -166,11 +188,12 @@ Backfill existing rows once:
 python -m src.main backfill-cities
 ```
 
+
+
 ## Change Tracking
 
 Each scrape: inserts new vacancies (`first_seen_at`), diffs tracked fields
-(`title`, `company_name`, `location`, `salary_*`, `description`,
-`welcome_ukraine`) writing a `vacancy_changes` row per change, and deactivates
+(`title`, `company_name`, `location`, `salary_*`, `description`) writing a `vacancy_changes` row per change, and deactivates
 vacancies absent from the run.
 
 ```sql
@@ -181,22 +204,26 @@ SELECT * FROM vacancy_changes WHERE vacancy_id = '<uuid>' ORDER BY changed_at DE
 SELECT * FROM v_latest_scrape_runs;
 ```
 
+
+
 ## Telegram Bot
 
 - Full-text search over original text **and** RU translation
-  (`include`, `-exclude`, `~fuzzy`, and admin-only `regex`).
+(`include`, `-exclude`, `~fuzzy`, and admin-only `regex`).
 - Context filters: location (normalized), date, salary range.
 - Subscriptions with de-duplicated delivery of new matches.
 - Admin: `/admin_stats` (delivery + metrics), `🛠 Админ` menu.
 
+
+
 ### Admin notifications
 
 - **Daily health report** (`daily_report` job, `SCHEDULE_DAILY_REPORT`):
-  vacancies added per source & total, translated per period & total, overall
-  totals, and per-source scraper health. Alerts if **no** new vacancies appeared
-  in `DAILY_REPORT_STALE_HOURS`.
+vacancies added per source & total, translated per period & total, overall
+totals, and per-source scraper health. Alerts if **no** new vacancies appeared
+in `DAILY_REPORT_STALE_HOURS`.
 - **New user** and **new subscriber** alerts (toggle with
-  `ADMIN_NOTIFY_NEW_USERS` / `ADMIN_NOTIFY_NEW_SUBSCRIPTIONS`).
+`ADMIN_NOTIFY_NEW_USERS` / `ADMIN_NOTIFY_NEW_SUBSCRIPTIONS`).
 
 Recipients are resolved from `TELEGRAM_ADMIN_USERNAMES` (their last chat id).
 
@@ -212,9 +239,11 @@ docker compose up -d admin
 docker compose exec admin python manage.py createsuperuser
 ```
 
+
+
 ## Configuration (`.env`)
 
-Key settings (see [`.env.example`](.env.example) for the full list):
+Key settings (see `[.env.example](.env.example)` for the full list):
 
 ```
 DATABASE_URL=postgresql+asyncpg://scraper:scraper_pass@localhost:5432/job_scraper
@@ -245,7 +274,11 @@ DJANGO_DEBUG=false
 DJANGO_ALLOWED_HOSTS=*
 ```
 
+
+
 ## Development
+
+
 
 ### Lint gate (pre-commit)
 
@@ -260,11 +293,15 @@ poetry run ruff check . --fix      # lint + autofix
 poetry run black .                 # format
 ```
 
+
+
 ### Tests
 
 ```bash
 poetry run pytest                  # async tests on in-memory sqlite
 ```
+
+
 
 ### Migrations
 
@@ -273,14 +310,20 @@ poetry run alembic revision -m "..."   # new revision (edit by hand)
 poetry run alembic upgrade head
 ```
 
+
+
 ## CI/CD (GitHub Actions)
 
-| Stage | Trigger | Action |
-|-------|---------|--------|
-| `lint` | every push/PR | ruff + black + mypy |
-| `test` | after lint | pytest + coverage |
-| `docker` | push to `main` | build & push image |
-| `deploy` | after docker | SSH deploy |
+
+| Stage    | Trigger        | Action              |
+| -------- | -------------- | ------------------- |
+| `lint`   | every push/PR  | ruff + black + mypy |
+| `test`   | after lint     | pytest + coverage   |
+| `docker` | push to `main` | build & push image  |
+| `deploy` | after docker   | SSH deploy          |
+
+
+
 
 ## Production Operations
 
@@ -300,12 +343,15 @@ docker compose exec postgres pg_dump -U scraper -d job_scraper > backup.sql
 cat backup.sql | docker compose exec -T postgres psql -U scraper -d job_scraper
 ```
 
+
+
 ## Adding a New Source
 
 1. Create `src/scrapers/mysource.py` extending `BaseScraper`.
 2. Set `source = "mysource"` and implement `scrape_all()` as an async generator
-   of `VacancyData` (always yield a non-empty `external_id` and a full URL —
+  of `VacancyData` (always yield a non-empty `external_id` and a full URL —
    the integrity guard drops the rest).
 3. Register a job in `src/scheduler.py` and a `SCHEDULE_MYSOURCE` in
-   `config.py` / `.env.example`.
+  `config.py` / `.env.example`.
 4. Add selectors/quirks notes and a test.
+
