@@ -638,6 +638,14 @@ class TelegramBotService:
             f"⭐ Новая подписка #{sub_id}\n{self._user_display(user)}\nЗапрос: {query_preview}"
         )
 
+    async def _execute_subscribe(self, message: Message, query_raw: str) -> None:
+        if message.from_user is None:
+            return
+        query_preview = query_raw if len(query_raw) <= 120 else query_raw[:120] + "…"
+        await self.notify_admins(
+            f"⭐ Новая подписка #{sub_id}\n{self._user_display(user)}\nЗапрос: {query_preview}"
+        )
+
     async def _create_subscription(
         self, user: User, chat_id: int, query_raw: str
     ) -> tuple[int, bool]:
@@ -660,39 +668,8 @@ class TelegramBotService:
                 chat_id=chat_id,
                 query=query_raw,
             )
-            await self._seed_subscription_deliveries(session, sub.id, query_raw)
-            return sub.id, True
-
-    async def _seed_subscription_deliveries(
-        self, session: Any, subscription_id: int, query_raw: str
-    ) -> None:
-        """Mark all current matches as delivered (no message sent)."""
-        parsed = parse_search_query(query_raw)
-        search_repo = VacancySearchRepository(session)
-        delivery_repo = TelegramDeliveryRepository(session)
-        rows = await search_repo.search(
-            includes=parsed.includes,
-            excludes=parsed.excludes,
-            fuzzy=parsed.fuzzy,
-            regex=None,
-            language=settings.deepl_target_lang,
-            limit=settings.telegram_search_limit,
-            is_admin=False,
-        )
-        for row in rows:
-            await delivery_repo.mark_sent(subscription_id, row.id)
-
-    async def _execute_subscribe(self, message: Message, query_raw: str) -> None:
-        if message.from_user is None:
-            return
-        sub_id, created = await self._create_subscription(
-            message.from_user, message.chat.id, query_raw
-        )
-        if created:
-            await self._send_text(message.chat.id, TelegramMessages.subscription_created(sub_id))
-            await self._notify_new_subscription(message.from_user, sub_id, query_raw)
-        else:
-            await self._send_text(message.chat.id, TelegramMessages.subscription_exists(sub_id))
+        await self._send_text(message.chat.id, TelegramMessages.subscription_created(sub.id))
+        await self._notify_new_subscription(message.from_user, sub.id, query_raw)
 
     def _register_handlers(self) -> None:
         @self.router.message(Command("start"))
@@ -1103,20 +1080,8 @@ class TelegramBotService:
                 callback.from_user, callback.message.chat.id, query_raw
             )
             self._pending_inline_queries.pop(token, None)
-            # Toast (fast feedback) + a persistent chat message (so it is not missed)
-            await callback.answer(
-                text=f"Подписка #{sub_id} создана" if created else "Подписка уже существует",
-                show_alert=False,
-            )
-            if created:
-                await self._send_text(
-                    callback.message.chat.id, TelegramMessages.subscription_created(sub_id)
-                )
-                await self._notify_new_subscription(callback.from_user, sub_id, query_raw)
-            else:
-                await self._send_text(
-                    callback.message.chat.id, TelegramMessages.subscription_exists(sub_id)
-                )
+            await callback.answer(text=f"Подписка #{sub.id} создана")
+            await self._notify_new_subscription(callback.from_user, sub.id, query_raw)
 
         @self.router.message()
         async def _pending_text(message: Message) -> None:
