@@ -5,8 +5,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import BigInteger
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.compiler import compiles
 
 from src.models.orm import Base
 

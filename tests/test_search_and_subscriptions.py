@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import pytest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import select
 
 from src.db.repository import (
@@ -164,7 +164,7 @@ async def test_daily_report_counts_and_stale_flag(db_session):
                                          url="https://example.com/d2"))
 
     stats_repo = StatsRepository(db_session)
-    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    since = datetime.now(UTC) - timedelta(hours=24)
     report = await stats_repo.daily_report(since)
 
     assert report["new_total"] == 2
@@ -173,7 +173,7 @@ async def test_daily_report_counts_and_stale_flag(db_session):
     assert report["active_vacancies"] == 2
 
     # Nothing added in the far future window → stale
-    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    future = datetime.now(UTC) + timedelta(hours=1)
     stale = await stats_repo.daily_report(future)
     assert stale["new_total"] == 0
 
@@ -315,7 +315,7 @@ async def test_search_with_location_date_salary_filters(db_session):
     old_vacancy = (
         await db_session.execute(select(Vacancy).where(Vacancy.external_id == "v5"))
     ).scalar_one()
-    old_vacancy.first_seen_at = datetime.now(timezone.utc) - timedelta(days=20)
+    old_vacancy.first_seen_at = datetime.now(UTC) - timedelta(days=20)
     await db_session.flush()
 
     s_repo = VacancySearchRepository(db_session)
@@ -328,7 +328,7 @@ async def test_search_with_location_date_salary_filters(db_session):
         limit=20,
         is_admin=False,
         location="Vilnius",
-        published_from=datetime.now(timezone.utc) - timedelta(days=7),
+        published_from=datetime.now(UTC) - timedelta(days=7),
         salary_from=1800,
         salary_to=3500,
     )

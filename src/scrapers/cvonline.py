@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 
 from playwright.async_api import ElementHandle
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError

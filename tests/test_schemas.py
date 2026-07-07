@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
 
 from src.models.schemas import VacancyData
 from src.scrapers.base import BaseScraper

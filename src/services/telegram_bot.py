@@ -7,9 +7,10 @@ import re
 import time
 import traceback
 import uuid
-from datetime import datetime, timedelta, timezone
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
@@ -279,7 +280,7 @@ class TelegramBotService:
             and not user.is_bot
             and (user.username or "").lower() not in self._admin_usernames
         ):
-            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
             await self.notify_admins(
                 f"👤 Новый пользователь бота\n{self._user_display(user)}\nВремя: {ts}"
             )
@@ -376,7 +377,7 @@ class TelegramBotService:
         parsed = parse_search_query(query) if query else parse_search_query("")
         published_from: datetime | None = None
         if ctx["date_days"]:
-            published_from = datetime.now(timezone.utc) - timedelta(days=int(ctx["date_days"]))
+            published_from = datetime.now(UTC) - timedelta(days=int(ctx["date_days"]))
         started = time.perf_counter()
         is_admin = await self._is_admin_user(message.chat.id, effective_user)
         async with get_session() as session:
@@ -951,7 +952,7 @@ class TelegramBotService:
                     return
                 username = message.from_user.username
                 user_display = f"@{username}" if username else f"id={message.from_user.id}"
-                ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
                 report = (
                     "📝 Обратная связь\n"
                     f"От: {user_display}\n"

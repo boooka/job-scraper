@@ -4,8 +4,9 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Iterable, Sequence
+from collections.abc import Iterable, Sequence
+from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import and_, func, literal, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -109,7 +110,7 @@ class CompanyRepository:
                 changed = True
 
         if changed:
-            company.updated_at = datetime.now(timezone.utc)
+            company.updated_at = datetime.now(UTC)
             self._session.add(company)
 
 
@@ -251,8 +252,8 @@ class VacancyRepository:
                 welcome_ukraine=data.welcome_ukraine if data.welcome_ukraine else False,
                 extra=data.extra or {},
                 is_active=True,
-                first_seen_at=datetime.now(timezone.utc),
-                last_seen_at=datetime.now(timezone.utc),
+                first_seen_at=datetime.now(UTC),
+                last_seen_at=datetime.now(UTC),
             )
             self._session.add(vacancy)
             await self._session.flush()
@@ -262,7 +263,7 @@ class VacancyRepository:
         # Detect field-level changes
         changes: list[VacancyChange] = []
         update_fields: dict[str, Any] = {
-            "last_seen_at": datetime.now(timezone.utc),
+            "last_seen_at": datetime.now(UTC),
             "is_active": True,
             # Always refresh non-tracked fields silently
             "page_html": data.page_html,
@@ -319,7 +320,7 @@ class VacancyRepository:
             update(Vacancy)
             .where(Vacancy.id == existing.id)
             .values(
-                last_seen_at=datetime.now(timezone.utc),
+                last_seen_at=datetime.now(UTC),
                 is_active=True,
                 page_html=data.page_html,
                 url=data.url,
@@ -393,14 +394,14 @@ class TranslationRepository:
                 title_translated=title_translated,
                 description_translated=description_translated,
                 translator=translator,
-                translated_at=datetime.now(timezone.utc),
+                translated_at=datetime.now(UTC),
             )
             self._session.add(translation)
         else:
             translation.title_translated = title_translated
             translation.description_translated = description_translated
             translation.translator = translator
-            translation.translated_at = datetime.now(timezone.utc)
+            translation.translated_at = datetime.now(UTC)
             self._session.add(translation)
 
         await self._session.flush()
@@ -509,7 +510,7 @@ class TelegramSubscriptionRepository:
         if sub is None:
             return False
         sub.is_active = False
-        sub.cancelled_at = datetime.now(timezone.utc)
+        sub.cancelled_at = datetime.now(UTC)
         self._session.add(sub)
         return True
 
@@ -549,7 +550,7 @@ class TelegramUserRepository:
         stmt = select(TelegramUser).where(TelegramUser.telegram_user_id == telegram_user_id)
         result = await self._session.execute(stmt)
         user = result.scalar_one_or_none()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if user is None:
             user = TelegramUser(
                 telegram_user_id=telegram_user_id,
@@ -901,7 +902,7 @@ class ScrapeRunRepository:
         error_message: str | None = None,
     ) -> None:
         run.status = status
-        run.finished_at = datetime.now(timezone.utc)
+        run.finished_at = datetime.now(UTC)
         run.vacancies_found = vacancies_found
         run.new_count = new_count
         run.changed_count = changed_count

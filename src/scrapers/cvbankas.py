@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import AsyncGenerator
-
-from playwright.async_api import Page
+from collections.abc import AsyncGenerator
 
 from src.logger import get_logger
 from src.models.schemas import VacancyData

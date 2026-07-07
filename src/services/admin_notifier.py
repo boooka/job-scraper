@@ -6,7 +6,7 @@ no new vacancies appeared — a strong signal a scraper broke.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from src.config import settings
@@ -77,7 +77,7 @@ def format_daily_report(stats: dict[str, Any], *, stale_hours: int) -> str:
 async def run_daily_admin_report() -> dict[str, Any]:
     """Build the daily report and push it to admins. Safe to run manually."""
     stale_hours = settings.daily_report_stale_hours
-    since = datetime.now(timezone.utc) - timedelta(hours=stale_hours)
+    since = datetime.now(UTC) - timedelta(hours=stale_hours)
 
     async with get_session() as session:
         stats = await StatsRepository(session).daily_report(since)

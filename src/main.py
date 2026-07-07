@@ -20,11 +20,11 @@ async def main() -> None:
     elif command == "scrape":
         # Usage: python -m src.main scrape [cvbankas|cvonline|cvmarket|all]
         target = sys.argv[2] if len(sys.argv) > 2 else "all"
-        from src.services.scrape_service import run_scrape
-        from src.scrapers.cvbankas import CVBankasScraper
-        from src.scrapers.cvonline import CVOnlineScraper
-        from src.scrapers.cvmarket import CVMarketScraper
         from src.scrapers.cv import CVScraper
+        from src.scrapers.cvbankas import CVBankasScraper
+        from src.scrapers.cvmarket import CVMarketScraper
+        from src.scrapers.cvonline import CVOnlineScraper
+        from src.services.scrape_service import run_scrape
 
         scrapers = {
             "cvbankas": CVBankasScraper,
@@ -35,7 +35,7 @@ async def main() -> None:
 
         targets = list(scrapers.values()) if target == "all" else [scrapers[target]]
         for scraper_cls in targets:
-            if scraper_cls.is_active == False:
+            if not scraper_cls.is_active:
                 continue
             result = await run_scrape(scraper_cls)
             log.info("run.summary", **result)

@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import re
-from typing import Any, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import Any
 
 from playwright.async_api import ElementHandle
 

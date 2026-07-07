@@ -1,0 +1,13 @@
+# Blocks `git commit` until the linter is clean.
+# Setup (once per clone):  pre-commit install
+# Run manually on everything:  pre-commit run --all-files
+minimum_pre_commit_version: "3.5.0"
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Keep in sync with the ruff version in pyproject.toml dev dependencies.
+    rev: v0.4.10
+    hooks:
+      # Lint gate: fails the commit on any ruff error (config in pyproject.toml).
+      - id: ruff
+        args: [--fix]

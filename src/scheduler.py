@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from zoneinfo import ZoneInfo
 
 from src.config import settings
 from src.logger import get_logger

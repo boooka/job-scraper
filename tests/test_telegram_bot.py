@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from src.services.search_query import parse_search_query
 from src.services.telegram_bot import TelegramBotService
 

@@ -6,7 +6,7 @@ import asyncio
 import html
 import json
 import traceback
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 from tenacity import retry, stop_after_attempt, wait_fixed
