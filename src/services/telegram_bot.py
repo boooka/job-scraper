@@ -636,6 +636,32 @@ class TelegramBotService:
             reply_markup=self._search_controls_keyboard(session_token, has_more=True),
         )
 
+    async def _send_subscriptions_list(self, chat_id: int, user_id: int) -> bool:
+        """Render the user's active subscriptions, each with current-offers /
+        unsubscribe buttons. Returns True if any were shown."""
+        async with get_session() as session:
+            repo = TelegramSubscriptionRepository(session)
+            rows = await repo.list_active_for_user(user_id)
+        if not rows:
+            await self._send_text(chat_id, TelegramMessages.NO_SUBSCRIPTIONS)
+            return False
+        await self._send_text(chat_id, TelegramMessages.SUBSCRIPTIONS_HEADER)
+        for r in rows:
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🔎 Текущие предложения", callback_data=f"sub_show:{r.id}"
+                        )
+                    ],
+                    [InlineKeyboardButton(text="❌ Отписаться", callback_data=f"sub_cancel:{r.id}")],
+                ]
+            )
+            await self._send_text(
+                chat_id, f"#{r.id}: {r.query}", reply_markup=keyboard, markdown=False
+            )
+        return True
+
     async def _show_subscription_matches(self, chat_id: int, query_raw: str) -> None:
         """Run a subscription's query on demand and show the current matches."""
         parsed = parse_search_query(query_raw)
@@ -743,10 +769,11 @@ class TelegramBotService:
         @self.router.message(Command("help"))
         async def _help(message: Message) -> None:
             await self._remember_user(message.from_user, message.chat.id)
+            is_admin = await self._is_admin(message)
             await self._send_text(
                 message.chat.id,
-                TelegramMessages.help_text(),
-                reply_keyboard=self._main_menu(await self._is_admin(message)),
+                TelegramMessages.help_text(is_admin),
+                reply_keyboard=self._main_menu(is_admin),
             )
 
         @self.router.message(Command("search"))
@@ -776,35 +803,7 @@ class TelegramBotService:
             await self._remember_user(message.from_user, message.chat.id)
             if message.from_user is None:
                 return
-            async with get_session() as session:
-                repo = TelegramSubscriptionRepository(session)
-                rows = await repo.list_active_for_user(message.from_user.id)
-            if not rows:
-                await self._send_text(message.chat.id, TelegramMessages.NO_SUBSCRIPTIONS)
-                return
-            await self._send_text(message.chat.id, TelegramMessages.SUBSCRIPTIONS_HEADER)
-            for r in rows:
-                keyboard = InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="🔎 Текущие предложения",
-                                callback_data=f"sub_show:{r.id}",
-                            )
-                        ],
-                        [
-                            InlineKeyboardButton(
-                                text="❌ Отписаться", callback_data=f"sub_cancel:{r.id}"
-                            )
-                        ],
-                    ]
-                )
-                await self._send_text(
-                    message.chat.id,
-                    f"#{r.id}: {r.query}",
-                    reply_markup=keyboard,
-                    markdown=False,
-                )
+            await self._send_subscriptions_list(message.chat.id, message.from_user.id)
 
         @self.router.message(Command("unsubscribe"))
         async def _unsubscribe(message: Message) -> None:
@@ -813,9 +812,8 @@ class TelegramBotService:
                 return
             arg = self._extract_args(message.text or "")
             if not arg.isdigit():
-                if message.from_user:
-                    self._pending_user_action[message.from_user.id] = "unsubscribe"
-                await self._send_text(message.chat.id, "Укажите ID подписки для отмены:")
+                # No ID given → show the list with per-subscription cancel buttons
+                await self._send_subscriptions_list(message.chat.id, message.from_user.id)
                 return
             async with get_session() as session:
                 repo = TelegramSubscriptionRepository(session)
@@ -884,7 +882,12 @@ class TelegramBotService:
                     return
                 user_id = callback.from_user.id
                 if data == "help:help":
-                    await self._send_text(callback.message.chat.id, TelegramMessages.help_text())
+                    is_admin = await self._is_admin_user(
+                        callback.message.chat.id, callback.from_user
+                    )
+                    await self._send_text(
+                        callback.message.chat.id, TelegramMessages.help_text(is_admin)
+                    )
                     await callback.answer()
                     return
                 if data == "help:feedback":
@@ -1208,8 +1211,7 @@ class TelegramBotService:
                 await _subscriptions(message)
                 return
             if message.text == self.BTN_UNSUBSCRIBE:
-                self._pending_user_action[message.from_user.id] = "unsubscribe"
-                await self._send_text(message.chat.id, "Укажите ID подписки для отмены:")
+                await self._send_subscriptions_list(message.chat.id, message.from_user.id)
                 return
             if message.text == self.BTN_ADMIN_SUBS:
                 await _admin_subs(message)
