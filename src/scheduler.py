@@ -1,4 +1,5 @@
 """APScheduler configuration and job definitions."""
+
 from __future__ import annotations
 
 import asyncio
@@ -122,7 +123,6 @@ def create_scheduler() -> AsyncIOScheduler:
         max_instances=1,
         misfire_grace_time=120,
     )
-
 
     return scheduler
 

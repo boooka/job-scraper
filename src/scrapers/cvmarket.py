@@ -1,4 +1,5 @@
 """Scraper for cvmarket.lt."""
+
 from __future__ import annotations
 
 import re
@@ -37,9 +38,7 @@ class CVMarketScraper(BaseScraper):
                     timeout=15_000,
                 )
 
-                items = await page.query_selector_all(
-                    "article[data-component='jobad']"
-                )
+                items = await page.query_selector_all("article[data-component='jobad']")
                 if not items:
                     log.info("cvmarket.no_more_items", start=start)
                     break

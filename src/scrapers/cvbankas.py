@@ -1,4 +1,5 @@
 """Scraper for en.cvbankas.lt."""
+
 from __future__ import annotations
 
 import re
@@ -28,10 +29,14 @@ class CVBankasScraper(BaseScraper):
                 log.info("cvbankas.fetch_page", page=page_num, url=url)
 
                 await page.goto(url, wait_until="domcontentloaded")
-                await page.wait_for_selector("div#js_id_id_job_ad_list article.list_article", timeout=15_000)
+                await page.wait_for_selector(
+                    "div#js_id_id_job_ad_list article.list_article", timeout=15_000
+                )
 
                 # items = await page.query_selector_all("ul#job_ad_list li.list_article")
-                items = await page.query_selector_all("div#js_id_id_job_ad_list article.list_article")
+                items = await page.query_selector_all(
+                    "div#js_id_id_job_ad_list article.list_article"
+                )
                 if not items:
                     log.info("cvbankas.no_more_pages", page=page_num)
                     break
@@ -49,7 +54,9 @@ class CVBankasScraper(BaseScraper):
                 quote = await next_el.inner_text() if next_el else None
                 # First page has no prev button
                 if quote == "»" and page_num > 1:
-                    log.info("cvbankas.parser", error=f"Next button for page {page_num} is inactive")
+                    log.info(
+                        "cvbankas.parser", error=f"Next button for page {page_num} is inactive"
+                    )
                     break
                 page_num += 1
         except BaseException as exc:

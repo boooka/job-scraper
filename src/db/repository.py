@@ -1,4 +1,5 @@
 """Vacancy repository with upsert, change tracking, company upsert."""
+
 from __future__ import annotations
 
 import hashlib
@@ -198,9 +199,7 @@ class VacancyRepository:
         # them, so one scraper regression can never corrupt the table again and
         # an already-good row is never overwritten with garbage.
         if not (data.external_id or "").strip():
-            log.warning(
-                "vacancy.skipped_blank_external_id", source=data.source, url=data.url
-            )
+            log.warning("vacancy.skipped_blank_external_id", source=data.source, url=data.url)
             return "skipped", []
         if _is_rootlike_url(data.url):
             log.warning(
@@ -303,9 +302,7 @@ class VacancyRepository:
             for change in changes:
                 self._session.add(change)
             await self._session.execute(
-                update(Vacancy)
-                .where(Vacancy.id == existing.id)
-                .values(**update_fields)
+                update(Vacancy).where(Vacancy.id == existing.id).values(**update_fields)
             )
             log.debug(
                 "vacancy.updated",
@@ -620,6 +617,7 @@ class TelegramDeliveryRepository:
         )
         await self._session.flush()
 
+
 class VacancySearchRepository:
     """Vacancy search with include/exclude/fuzzy and admin regex support."""
 
@@ -671,7 +669,9 @@ class VacancySearchRepository:
         salary_from: int | None = None,
         salary_to: int | None = None,
     ) -> Sequence[Vacancy]:
-        dialect = self._session.bind.dialect.name if self._session.bind is not None else "postgresql"
+        dialect = (
+            self._session.bind.dialect.name if self._session.bind is not None else "postgresql"
+        )
 
         if dialect != "postgresql":
             return await self._search_fallback(
@@ -753,14 +753,10 @@ class VacancySearchRepository:
             if not pattern.strip():
                 continue
             sql_like = self._fuzzy_to_sql_like(pattern)
-            stmt = stmt.where(
-                searchable_text.ilike(f"%{sql_like}%")
-            )
+            stmt = stmt.where(searchable_text.ilike(f"%{sql_like}%"))
 
         if regex and is_admin:
-            stmt = stmt.where(
-                searchable_text.op("~*")(regex)
-            )
+            stmt = stmt.where(searchable_text.op("~*")(regex))
 
         if location and location.strip():
             stmt = self._apply_location_filter(stmt, location.strip())
@@ -802,9 +798,7 @@ class VacancySearchRepository:
             + func.coalesce(VacancyTranslation.description_translated, "")
         )
         original_text = (
-            func.coalesce(Vacancy.title, "")
-            + literal(" ")
-            + func.coalesce(Vacancy.description, "")
+            func.coalesce(Vacancy.title, "") + literal(" ") + func.coalesce(Vacancy.description, "")
         )
         searchable_text = original_text + literal(" ") + translated_text
 
@@ -953,9 +947,7 @@ class StatsRepository:
             ).scalar_one()
         )
         translated_total = int(
-            (
-                await self._session.execute(select(func.count(VacancyTranslation.id)))
-            ).scalar_one()
+            (await self._session.execute(select(func.count(VacancyTranslation.id)))).scalar_one()
         )
 
         # Per-source scrape-run health within the window
@@ -1007,4 +999,5 @@ def _is_rootlike_url(url: str | None) -> bool:
 def _synthetic_company_id(source: str, name: str) -> str:
     """Stable synthetic external_id for companies without a site-assigned ID."""
     import hashlib
+
     return hashlib.md5(f"{source}::{name}".encode()).hexdigest()

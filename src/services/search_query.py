@@ -1,4 +1,5 @@
 """Search query parser for Telegram bot commands."""
+
 from __future__ import annotations
 
 import shlex

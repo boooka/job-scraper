@@ -4,6 +4,7 @@ Idempotent — safe to re-run. New scrapes resolve the city automatically via
 :class:`~src.db.repository.CityRepository`, so this is only needed once for data
 that predates the cities feature (and after schema changes).
 """
+
 from __future__ import annotations
 
 from sqlalchemy import select, update
@@ -26,9 +27,7 @@ async def backfill_cities() -> dict[str, int]:
     """
     async with get_session() as session:
         result = await session.execute(
-            select(Vacancy.location)
-            .where(Vacancy.location.is_not(None))
-            .group_by(Vacancy.location)
+            select(Vacancy.location).where(Vacancy.location.is_not(None)).group_by(Vacancy.location)
         )
         locations = [row[0] for row in result.all() if row[0] and row[0].strip()]
 

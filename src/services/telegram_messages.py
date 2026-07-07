@@ -1,4 +1,5 @@
 """Telegram message templates for easy localization and UX updates."""
+
 from __future__ import annotations
 
 
@@ -14,7 +15,7 @@ class TelegramMessages:
             "/admin_subscriptions - все подписчики (только админ)\n"
             "/admin_stats - статистика рассылки/метрик (только админ)\n\n"
             "Синтаксис запроса:\n"
-            "  слово или \"фраза\" - включить (AND)\n"
+            '  слово или "фраза" - включить (AND)\n'
             "  -слово - исключить\n"
             "  ~шаблон* - нечеткое совпадение (* как wildcard)\n"
             "  /regex/ - регулярка (только админ)"
@@ -99,4 +100,3 @@ class TelegramMessages:
             f"- зарплата до: {salary_to if salary_to is not None else '-'}\n"
             f"- автопоиск: {'вкл' if auto_search else 'выкл'}"
         )
-

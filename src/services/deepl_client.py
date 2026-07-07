@@ -1,4 +1,5 @@
 """DeepL translation service for vacancy titles and descriptions."""
+
 from __future__ import annotations
 
 import httpx
@@ -9,7 +10,7 @@ from src.logger import get_logger
 log = get_logger(__name__)
 
 DEEPL_API_URL = "https://api-free.deepl.com/v2/translate"  # free tier
-DEEPL_API_URL_PRO = "https://api.deepl.com/v2/translate"   # paid tier
+DEEPL_API_URL_PRO = "https://api.deepl.com/v2/translate"  # paid tier
 
 
 class DeepLClient:
@@ -18,11 +19,7 @@ class DeepLClient:
     def __init__(self) -> None:
         self._api_key = settings.deepl_api_key
         # Pro keys end with ":fx" — free keys do not
-        self._base_url = (
-            DEEPL_API_URL_PRO
-            if not self._api_key.endswith(":fx")
-            else DEEPL_API_URL
-        )
+        self._base_url = DEEPL_API_URL_PRO if not self._api_key.endswith(":fx") else DEEPL_API_URL
 
     async def translate_batch(
         self,

@@ -1,4 +1,5 @@
 """Tests for VacancyRepository — upsert and change tracking."""
+
 from __future__ import annotations
 
 import pytest
@@ -33,9 +34,8 @@ async def test_upsert_creates_new_vacancy(db_session):
     assert changes == []
 
     from sqlalchemy import select
-    result = await db_session.execute(
-        select(Vacancy).where(Vacancy.external_id == "12345")
-    )
+
+    result = await db_session.execute(select(Vacancy).where(Vacancy.external_id == "12345"))
     v = result.scalar_one()
     assert v.title == "Python Developer"
     assert v.salary_min == 2000
@@ -58,9 +58,7 @@ async def test_upsert_detects_salary_change(db_session):
     repo = VacancyRepository(db_session)
     await repo.upsert_vacancy(_make_vacancy(salary_min=2000, salary_max=3000))
 
-    action, changes = await repo.upsert_vacancy(
-        _make_vacancy(salary_min=2500, salary_max=3500)
-    )
+    action, changes = await repo.upsert_vacancy(_make_vacancy(salary_min=2500, salary_max=3500))
 
     assert action == "updated"
     field_names = {c.field_name for c in changes}
@@ -90,9 +88,8 @@ async def test_deactivate_missing(db_session):
     assert count == 2
 
     from sqlalchemy import select
-    result = await db_session.execute(
-        select(Vacancy).where(Vacancy.external_id == "bbb")
-    )
+
+    result = await db_session.execute(select(Vacancy).where(Vacancy.external_id == "bbb"))
     v = result.scalar_one()
     assert v.is_active is False
 
@@ -104,6 +101,7 @@ async def test_vacancy_change_record_saved(db_session):
     await repo.upsert_vacancy(_make_vacancy(company="New Corp"))
 
     from sqlalchemy import select
+
     result = await db_session.execute(
         select(VacancyChange).where(VacancyChange.field_name == "company_name")
     )

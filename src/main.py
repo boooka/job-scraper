@@ -1,4 +1,5 @@
 """Main entrypoint — scheduler or one-off scrape."""
+
 from __future__ import annotations
 
 import asyncio
@@ -15,6 +16,7 @@ async def main() -> None:
 
     if command == "scheduler":
         from src.scheduler import run_scheduler
+
         await run_scheduler()
 
     elif command == "scrape":
@@ -42,22 +44,26 @@ async def main() -> None:
 
     elif command == "migrate":
         from src.db.engine import create_tables
+
         await create_tables()
         log.info("db.tables_created")
 
     elif command == "backfill-cities":
         from src.services.city_backfill import backfill_cities
+
         summary = await backfill_cities()
         log.info("backfill.summary", **summary)
 
     elif command == "daily-report":
         from src.services.admin_notifier import run_daily_admin_report
+
         result = await run_daily_admin_report()
         print(result.get("report", ""))
         log.info("daily_report.manual_run", sent_to_admins=result.get("sent_to_admins", 0))
 
     elif command == "bot":
         from src.services.telegram_bot import run_telegram_bot
+
         await run_telegram_bot()
 
     else:

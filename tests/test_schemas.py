@@ -1,4 +1,5 @@
 """Tests for Pydantic schemas and salary parsing."""
+
 from __future__ import annotations
 
 import pytest
