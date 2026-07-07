@@ -121,6 +121,25 @@ async def test_unsubscribe_marks_inactive_and_keeps_row(db_session):
 
 
 @pytest.mark.asyncio
+async def test_subscription_dedup_and_get_for_user(db_session):
+    repo = TelegramSubscriptionRepository(db_session)
+    sub = await repo.add(telegram_user_id=7, username="u", chat_id=70, query="  Python Dev ")
+
+    # Same query (case/space-insensitive) is found as an existing active sub
+    dup = await repo.find_active_by_query(7, "python dev")
+    assert dup is not None and dup.id == sub.id
+    # A different query is not matched
+    assert await repo.find_active_by_query(7, "java") is None
+    # Ownership-scoped fetch
+    assert (await repo.get_active_for_user(sub.id, 7)) is not None
+    assert (await repo.get_active_for_user(sub.id, 999)) is None
+
+    # After cancellation it is no longer found
+    await repo.cancel_for_user(sub.id, 7)
+    assert await repo.find_active_by_query(7, "python dev") is None
+
+
+@pytest.mark.asyncio
 async def test_telegram_user_upsert_tracks_last_seen(db_session):
     repo = TelegramUserRepository(db_session)
     _, created_first = await repo.upsert_user(

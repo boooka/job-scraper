@@ -496,6 +496,29 @@ class TelegramSubscriptionRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_active_for_user(
+        self, subscription_id: int, telegram_user_id: int
+    ) -> TelegramSubscription | None:
+        stmt = select(TelegramSubscription).where(
+            TelegramSubscription.id == subscription_id,
+            TelegramSubscription.telegram_user_id == telegram_user_id,
+            TelegramSubscription.is_active.is_(True),
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def find_active_by_query(
+        self, telegram_user_id: int, query: str
+    ) -> TelegramSubscription | None:
+        """Return an existing active subscription with the same query (dedup)."""
+        stmt = select(TelegramSubscription).where(
+            TelegramSubscription.telegram_user_id == telegram_user_id,
+            TelegramSubscription.is_active.is_(True),
+            func.lower(func.trim(TelegramSubscription.query)) == query.strip().lower(),
+        )
+        result = await self._session.execute(stmt)
+        return result.scalars().first()
+
     async def cancel_for_user(self, subscription_id: int, telegram_user_id: int) -> bool:
         stmt = select(TelegramSubscription).where(
             TelegramSubscription.id == subscription_id,

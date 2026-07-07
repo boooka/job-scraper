@@ -5,21 +5,29 @@ from __future__ import annotations
 
 class TelegramMessages:
     @staticmethod
-    def help_text() -> str:
-        return (
-            "Команды:\n"
-            "/search <запрос> - поиск вакансий\n"
-            "/subscribe <запрос> - подписаться на запрос\n"
-            "/subscriptions - мои активные подписки\n"
-            "/unsubscribe <id> - отменить подписку\n"
-            "/admin_subscriptions - все подписчики (только админ)\n"
-            "/admin_stats - статистика рассылки/метрик (только админ)\n\n"
-            "Синтаксис запроса:\n"
-            '  слово или "фраза" - включить (AND)\n'
-            "  -слово - исключить\n"
-            "  ~шаблон* - нечеткое совпадение (* как wildcard)\n"
-            "  /regex/ - регулярка (только админ)"
-        )
+    def help_text(is_admin: bool = False) -> str:
+        lines = [
+            "Команды:",
+            "/search <запрос> - поиск вакансий",
+            "/subscribe <запрос> - подписаться на запрос",
+            "/subscriptions - мои активные подписки",
+            "/unsubscribe - отменить подписку",
+        ]
+        if is_admin:
+            lines += [
+                "/admin_subscriptions - все подписчики (только админ)",
+                "/admin_stats - статистика рассылки/метрик (только админ)",
+            ]
+        lines += [
+            "",
+            "Синтаксис запроса:",
+            '  слово или "фраза" - включить (AND)',
+            "  -слово - исключить",
+            "  ~шаблон* - нечеткое совпадение (* как wildcard)",
+        ]
+        if is_admin:
+            lines.append("  /regex/ - регулярка (только админ)")
+        return "\n".join(lines)
 
     ASK_SEARCH_QUERY = "Укажите запрос: /search <запрос>"
     ASK_SUBSCRIBE_QUERY = "Укажите запрос: /subscribe <запрос>"
@@ -50,14 +58,28 @@ class TelegramMessages:
     ASK_CONTEXT_SALARY_RANGE = "Введите диапазон в формате: <от> <до>"
     CONTEXT_RESET = "Контекст поиска очищен."
     CONTEXT_EMPTY = "Контекст пуст."
+    REFINE_WITH_FILTERS = "Уточнить результат фильтрами (локация, зарплата, дата)?"
 
     @staticmethod
     def subscription_created(sub_id: int) -> str:
-        return f"Подписка создана: #{sub_id}"
+        return (
+            f"✅ Подписка создана: #{sub_id}\n"
+            "Буду присылать только новые вакансии по этому запросу. "
+            "Текущие предложения смотрите в «📋 Мои подписки»."
+        )
+
+    @staticmethod
+    def subscription_exists(sub_id: int) -> str:
+        return (
+            f"У вас уже есть активная подписка #{sub_id} на этот запрос. "
+            "Текущие предложения — в «📋 Мои подписки»."
+        )
 
     @staticmethod
     def subscription_cancelled(ok: bool) -> str:
         return "Подписка отменена." if ok else TelegramMessages.SUBSCRIPTION_NOT_FOUND
+
+    SUBSCRIPTIONS_HEADER = "Ваши подписки:"
 
     @staticmethod
     def user_subscriptions(lines: list[str]) -> str:

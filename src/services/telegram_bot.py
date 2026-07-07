@@ -31,6 +31,7 @@ from aiogram.types import (
 from src.config import settings
 from src.db.engine import get_session
 from src.db.repository import (
+    TelegramDeliveryRepository,
     TelegramSubscriptionRepository,
     TelegramUserRepository,
     VacancySearchRepository,
@@ -49,17 +50,35 @@ class TelegramDebugMiddleware(BaseMiddleware):
         super().__init__()
         self._debug = debug_cb
 
+    def _safe_debug(self, event_name: str, payload: dict[str, Any]) -> None:
+        """Debug logging must never break update processing."""
+        try:
+            self._debug(event_name, payload)
+        except Exception:  # pragma: no cover - diagnostics only
+            pass
+
+    def _log_event(self, event: TelegramObject) -> None:
+        """Dump an incoming update for debug logging, tolerating aiogram's
+        `Default` sentinels (not JSON-serializable). ``mode="python"`` +
+        ``warnings=False`` avoids raising / noisy pydantic warnings; the
+        downstream ``json.dumps(default=str)`` stringifies the rest."""
+        try:
+            payload = {"event": event.model_dump(mode="python", exclude_none=True, warnings=False)}
+        except Exception:  # pragma: no cover - diagnostics only
+            payload = {"event": repr(event)[:2000]}
+        self._safe_debug("telegram.update", payload)
+
     async def __call__(
         self,
         handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
-        self._debug("telegram.update", {"event": event.model_dump(mode="json", exclude_none=True)})
+        self._log_event(event)
         try:
             return await handler(event, data)
         except Exception as exc:
-            self._debug(
+            self._safe_debug(
                 "telegram.handler_error",
                 {"error": str(exc), "traceback": traceback.format_exc()},
             )
@@ -330,8 +349,45 @@ class TelegramBotService:
             self._search_context_by_user[user_id] = self._new_context()
         return self._search_context_by_user[user_id]
 
-    @staticmethod
-    def _context_menu_keyboard(auto_search: bool) -> InlineKeyboardMarkup:
+    # Selectable "published within N days" options for the date filter.
+    DATE_FILTER_OPTIONS: tuple[tuple[str, int], ...] = (
+        ("Сегодня", 1),
+        ("3 дня", 3),
+        ("7 дней", 7),
+        ("14 дней", 14),
+        ("30 дней", 30),
+    )
+
+    @classmethod
+    def _date_label(cls, date_days: int | None) -> str:
+        if not date_days:
+            return "📅 Дата"
+        for label, days in cls.DATE_FILTER_OPTIONS:
+            if days == date_days:
+                return f"📅 Дата: {label}"
+        return f"📅 Дата: {date_days} дн."
+
+    @classmethod
+    def _date_menu_keyboard(cls, current: int | None) -> InlineKeyboardMarkup:
+        rows: list[list[InlineKeyboardButton]] = []
+        row: list[InlineKeyboardButton] = []
+        for label, days in cls.DATE_FILTER_OPTIONS:
+            mark = "✅ " if current == days else ""
+            row.append(
+                InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"ctx:date:{days}")
+            )
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append([InlineKeyboardButton(text="♾️ Любая дата", callback_data="ctx:date:0")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    @classmethod
+    def _context_menu_keyboard(
+        cls, auto_search: bool, date_days: int | None = None
+    ) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -339,7 +395,9 @@ class TelegramBotService:
                     InlineKeyboardButton(text="📍 Локация", callback_data="ctx:set:location"),
                 ],
                 [
-                    InlineKeyboardButton(text="📅 Дата: 7 дней", callback_data="ctx:set:date7"),
+                    InlineKeyboardButton(
+                        text=cls._date_label(date_days), callback_data="ctx:set:date"
+                    ),
                     InlineKeyboardButton(text="💰 Зарплата", callback_data="ctx:set:salary"),
                 ],
                 [
@@ -382,7 +440,7 @@ class TelegramBotService:
                 date_days=ctx["date_days"],
                 auto_search=ctx["auto_search"],
             ),
-            reply_markup=self._context_menu_keyboard(bool(ctx["auto_search"])),
+            reply_markup=self._context_menu_keyboard(bool(ctx["auto_search"]), ctx["date_days"]),
         )
 
     async def _is_admin_user(self, chat_id: int, user: User) -> bool:
@@ -502,6 +560,25 @@ class TelegramBotService:
                 reply_markup=self._search_controls_keyboard(session_token, has_more=True),
             )
 
+        # Seed the filter context with this phrase and offer to refine it, so a
+        # plain phrase search can be narrowed by location / salary / date.
+        if message.from_user is not None:
+            self._get_context(message.from_user.id)["query"] = query_raw
+            await self._send_text(
+                message.chat.id,
+                TelegramMessages.REFINE_WITH_FILTERS,
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="🧩 Уточнить фильтрами", callback_data="ctx:open"
+                            )
+                        ]
+                    ]
+                ),
+                markdown=False,
+            )
+
         elapsed_ms = (time.perf_counter() - started) * 1000
         metrics_registry.observe_ms("search_latency_ms", elapsed_ms)
         metrics_registry.observe_search_query_latency(query_raw, elapsed_ms)
@@ -534,6 +611,73 @@ class TelegramBotService:
             )
             await self._send_text(chat_id, card, markdown=True, reply_markup=keyboard)
 
+    async def _send_result_set(self, *, chat_id: int, rows: list[Any], query_raw: str) -> None:
+        """Send a result set: inline for a few, paginated for many."""
+        if not rows:
+            await self._send_text(chat_id, TelegramMessages.NOTHING_FOUND)
+            return
+        total = len(rows)
+        show_all_threshold = max(1, settings.telegram_search_show_all_threshold)
+        next_batch_size = max(1, settings.telegram_search_next_batch_size)
+        if total <= show_all_threshold:
+            await self._send_rows(chat_id=chat_id, rows=rows, query_raw=query_raw)
+            return
+        session_token = uuid.uuid4().hex[:12]
+        self._search_sessions[session_token] = {
+            "chat_id": chat_id,
+            "query_raw": query_raw,
+            "rows": rows,
+            "offset": 1,
+        }
+        await self._send_rows(chat_id=chat_id, rows=rows[:1], query_raw=query_raw)
+        await self._send_text(
+            chat_id,
+            TelegramMessages.search_many_found(total=total, next_count=next_batch_size),
+            reply_markup=self._search_controls_keyboard(session_token, has_more=True),
+        )
+
+    async def _send_subscriptions_list(self, chat_id: int, user_id: int) -> bool:
+        """Render the user's active subscriptions, each with current-offers /
+        unsubscribe buttons. Returns True if any were shown."""
+        async with get_session() as session:
+            repo = TelegramSubscriptionRepository(session)
+            rows = await repo.list_active_for_user(user_id)
+        if not rows:
+            await self._send_text(chat_id, TelegramMessages.NO_SUBSCRIPTIONS)
+            return False
+        await self._send_text(chat_id, TelegramMessages.SUBSCRIPTIONS_HEADER)
+        for r in rows:
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🔎 Текущие предложения", callback_data=f"sub_show:{r.id}"
+                        )
+                    ],
+                    [InlineKeyboardButton(text="❌ Отписаться", callback_data=f"sub_cancel:{r.id}")],
+                ]
+            )
+            await self._send_text(
+                chat_id, f"#{r.id}: {r.query}", reply_markup=keyboard, markdown=False
+            )
+        return True
+
+    async def _show_subscription_matches(self, chat_id: int, query_raw: str) -> None:
+        """Run a subscription's query on demand and show the current matches."""
+        parsed = parse_search_query(query_raw)
+        async with get_session() as session:
+            repo = VacancySearchRepository(session)
+            rows = await repo.search(
+                includes=parsed.includes,
+                excludes=parsed.excludes,
+                fuzzy=parsed.fuzzy,
+                regex=None,
+                language=settings.deepl_target_lang,
+                limit=settings.telegram_search_limit,
+                is_admin=False,
+            )
+        await self._send_result_set(chat_id=chat_id, rows=list(rows), query_raw=query_raw)
+
     @staticmethod
     def _search_controls_keyboard(session_token: str, *, has_more: bool) -> InlineKeyboardMarkup:
         rows: list[list[InlineKeyboardButton]] = []
@@ -564,29 +708,72 @@ class TelegramBotService:
             f"⭐ Новая подписка #{sub_id}\n{self._user_display(user)}\nЗапрос: {query_preview}"
         )
 
+    async def _create_subscription(
+        self, user: User, chat_id: int, query_raw: str
+    ) -> tuple[int, bool]:
+        """Create a subscription (deduped) and seed its delivery log.
+
+        Returns ``(subscription_id, created)``. On create, the current matches
+        are marked as already delivered so the periodic notifier only pushes
+        genuinely new vacancies from now on — instead of flooding the user with
+        every existing match on the next run.
+        """
+        async with get_session() as session:
+            sub_repo = TelegramSubscriptionRepository(session)
+            existing = await sub_repo.find_active_by_query(user.id, query_raw)
+            if existing is not None:
+                return existing.id, False
+
+            sub = await sub_repo.add(
+                telegram_user_id=user.id,
+                username=user.username,
+                chat_id=chat_id,
+                query=query_raw,
+            )
+            await self._seed_subscription_deliveries(session, sub.id, query_raw)
+            return sub.id, True
+
+    async def _seed_subscription_deliveries(
+        self, session: Any, subscription_id: int, query_raw: str
+    ) -> None:
+        """Mark all current matches as delivered (no message sent)."""
+        parsed = parse_search_query(query_raw)
+        search_repo = VacancySearchRepository(session)
+        delivery_repo = TelegramDeliveryRepository(session)
+        rows = await search_repo.search(
+            includes=parsed.includes,
+            excludes=parsed.excludes,
+            fuzzy=parsed.fuzzy,
+            regex=None,
+            language=settings.deepl_target_lang,
+            limit=settings.telegram_search_limit,
+            is_admin=False,
+        )
+        for row in rows:
+            await delivery_repo.mark_sent(subscription_id, row.id)
+
     async def _execute_subscribe(self, message: Message, query_raw: str) -> None:
         if message.from_user is None:
             return
-        async with get_session() as session:
-            repo = TelegramSubscriptionRepository(session)
-            sub = await repo.add(
-                telegram_user_id=message.from_user.id,
-                username=message.from_user.username,
-                chat_id=message.chat.id,
-                query=query_raw,
-            )
-        await self._send_text(message.chat.id, TelegramMessages.subscription_created(sub.id))
-        await self._notify_new_subscription(message.from_user, sub.id, query_raw)
+        sub_id, created = await self._create_subscription(
+            message.from_user, message.chat.id, query_raw
+        )
+        if created:
+            await self._send_text(message.chat.id, TelegramMessages.subscription_created(sub_id))
+            await self._notify_new_subscription(message.from_user, sub_id, query_raw)
+        else:
+            await self._send_text(message.chat.id, TelegramMessages.subscription_exists(sub_id))
 
     def _register_handlers(self) -> None:
         @self.router.message(Command("start"))
         @self.router.message(Command("help"))
         async def _help(message: Message) -> None:
             await self._remember_user(message.from_user, message.chat.id)
+            is_admin = await self._is_admin(message)
             await self._send_text(
                 message.chat.id,
-                TelegramMessages.help_text(),
-                reply_keyboard=self._main_menu(await self._is_admin(message)),
+                TelegramMessages.help_text(is_admin),
+                reply_keyboard=self._main_menu(is_admin),
             )
 
         @self.router.message(Command("search"))
@@ -616,16 +803,7 @@ class TelegramBotService:
             await self._remember_user(message.from_user, message.chat.id)
             if message.from_user is None:
                 return
-            async with get_session() as session:
-                repo = TelegramSubscriptionRepository(session)
-                rows = await repo.list_active_for_user(message.from_user.id)
-            if not rows:
-                await self._send_text(message.chat.id, TelegramMessages.NO_SUBSCRIPTIONS)
-                return
-            await self._send_text(
-                message.chat.id,
-                TelegramMessages.user_subscriptions([f"#{r.id}: {r.query}" for r in rows]),
-            )
+            await self._send_subscriptions_list(message.chat.id, message.from_user.id)
 
         @self.router.message(Command("unsubscribe"))
         async def _unsubscribe(message: Message) -> None:
@@ -634,9 +812,8 @@ class TelegramBotService:
                 return
             arg = self._extract_args(message.text or "")
             if not arg.isdigit():
-                if message.from_user:
-                    self._pending_user_action[message.from_user.id] = "unsubscribe"
-                await self._send_text(message.chat.id, "Укажите ID подписки для отмены:")
+                # No ID given → show the list with per-subscription cancel buttons
+                await self._send_subscriptions_list(message.chat.id, message.from_user.id)
                 return
             async with get_session() as session:
                 repo = TelegramSubscriptionRepository(session)
@@ -705,7 +882,12 @@ class TelegramBotService:
                     return
                 user_id = callback.from_user.id
                 if data == "help:help":
-                    await self._send_text(callback.message.chat.id, TelegramMessages.help_text())
+                    is_admin = await self._is_admin_user(
+                        callback.message.chat.id, callback.from_user
+                    )
+                    await self._send_text(
+                        callback.message.chat.id, TelegramMessages.help_text(is_admin)
+                    )
                     await callback.answer()
                     return
                 if data == "help:feedback":
@@ -721,6 +903,10 @@ class TelegramBotService:
                     return
                 user_id = callback.from_user.id
                 ctx = self._get_context(user_id)
+                if data == "ctx:open":
+                    await self._open_context_menu(callback.message, user_id=user_id)
+                    await callback.answer()
+                    return
                 if data == "ctx:set:query":
                     self._pending_user_action[user_id] = "ctx_query"
                     await self._send_text(
@@ -769,13 +955,31 @@ class TelegramBotService:
                                 )
                     await callback.answer()
                     return
-                if data == "ctx:set:date7":
-                    ctx["history"].append(("date_days", ctx["date_days"]))
-                    ctx["date_days"] = 7
-                    await self._open_context_menu(callback.message, user_id=user_id)
-                    if ctx["auto_search"]:
-                        await self._run_context_search(callback.message, user=callback.from_user)
-                    await callback.answer("Фильтр даты применен")
+                if data == "ctx:set:date":
+                    await self._send_text(
+                        callback.message.chat.id,
+                        "Выберите период публикации:",
+                        reply_markup=self._date_menu_keyboard(ctx["date_days"]),
+                    )
+                    await callback.answer()
+                    return
+                if data.startswith("ctx:date:"):
+                    raw_days = data.split(":")[-1]
+                    if raw_days.isdigit():
+                        ctx["history"].append(("date_days", ctx["date_days"]))
+                        ctx["date_days"] = int(raw_days) or None
+                        await self._open_context_menu(callback.message, user_id=user_id)
+                        if ctx["auto_search"]:
+                            await self._run_context_search(
+                                callback.message, user=callback.from_user
+                            )
+                        await callback.answer(
+                            "Фильтр даты сброшен"
+                            if ctx["date_days"] is None
+                            else "Фильтр даты применён"
+                        )
+                    else:
+                        await callback.answer()
                     return
                 if data == "ctx:set:salary":
                     async with get_session() as session:
@@ -926,6 +1130,32 @@ class TelegramBotService:
                     await self._send_text(callback.message.chat.id, "Показаны все объявления.")
                 await callback.answer()
                 return
+            if data.startswith("sub_show:") or data.startswith("sub_cancel:"):
+                prefix, _, raw_id = data.partition(":")
+                if callback.message is None or callback.from_user is None or not raw_id.isdigit():
+                    await callback.answer()
+                    return
+                sub_id = int(raw_id)
+                if prefix == "sub_show":
+                    async with get_session() as session:
+                        repo = TelegramSubscriptionRepository(session)
+                        sub = await repo.get_active_for_user(sub_id, callback.from_user.id)
+                    if sub is None:
+                        await callback.answer("Подписка не найдена")
+                        return
+                    await callback.answer()
+                    await self._show_subscription_matches(callback.message.chat.id, sub.query)
+                else:  # sub_cancel
+                    async with get_session() as session:
+                        repo = TelegramSubscriptionRepository(session)
+                        ok = await repo.cancel_for_user(sub_id, callback.from_user.id)
+                    await callback.answer("Подписка отменена" if ok else "Не найдено")
+                    if ok:
+                        await self._send_text(
+                            callback.message.chat.id,
+                            TelegramMessages.subscription_cancelled(True),
+                        )
+                return
             if not data.startswith("subq:"):
                 await callback.answer()
                 return
@@ -934,17 +1164,24 @@ class TelegramBotService:
             if not query_raw or callback.from_user is None or callback.message is None:
                 await callback.answer()
                 return
-            async with get_session() as session:
-                repo = TelegramSubscriptionRepository(session)
-                sub = await repo.add(
-                    telegram_user_id=callback.from_user.id,
-                    username=callback.from_user.username,
-                    chat_id=callback.message.chat.id,
-                    query=query_raw,
-                )
+            sub_id, created = await self._create_subscription(
+                callback.from_user, callback.message.chat.id, query_raw
+            )
             self._pending_inline_queries.pop(token, None)
-            await callback.answer(text=f"Подписка #{sub.id} создана")
-            await self._notify_new_subscription(callback.from_user, sub.id, query_raw)
+            # Toast (fast feedback) + a persistent chat message (so it is not missed)
+            await callback.answer(
+                text=f"Подписка #{sub_id} создана" if created else "Подписка уже существует",
+                show_alert=False,
+            )
+            if created:
+                await self._send_text(
+                    callback.message.chat.id, TelegramMessages.subscription_created(sub_id)
+                )
+                await self._notify_new_subscription(callback.from_user, sub_id, query_raw)
+            else:
+                await self._send_text(
+                    callback.message.chat.id, TelegramMessages.subscription_exists(sub_id)
+                )
 
         @self.router.message()
         async def _pending_text(message: Message) -> None:
@@ -974,8 +1211,7 @@ class TelegramBotService:
                 await _subscriptions(message)
                 return
             if message.text == self.BTN_UNSUBSCRIBE:
-                self._pending_user_action[message.from_user.id] = "unsubscribe"
-                await self._send_text(message.chat.id, "Укажите ID подписки для отмены:")
+                await self._send_subscriptions_list(message.chat.id, message.from_user.id)
                 return
             if message.text == self.BTN_ADMIN_SUBS:
                 await _admin_subs(message)
