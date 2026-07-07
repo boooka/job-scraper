@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import AsyncGenerator
-
-from playwright.async_api import Page
+from collections.abc import AsyncGenerator
 
 from src.logger import get_logger
 from src.models.schemas import VacancyData
@@ -89,9 +87,23 @@ class CVBankasScraper(BaseScraper):
         location_el = await item.query_selector("span.list_city")
         location = (await location_el.inner_text()).strip() if location_el else None
 
-        salary_el = await item.query_selector("span.salary_amount")
-        raw_salary = (await salary_el.inner_text()).strip() if salary_el else None
+        # Salary: amount lives in .salary_amount, currency+period in .salary_period
+        # (e.g. "€/час"). Read the whole .salary_text so parse_salary sees both.
+        salary_text_el = await item.query_selector("span.salary_text")
+        if salary_text_el is None:
+            salary_text_el = await item.query_selector("span.salary_amount")
+        raw_salary = (await salary_text_el.inner_text()).strip() if salary_text_el else None
         salary_min, salary_max, currency, salary_period = self.parse_salary(raw_salary)
+        # cvbankas always pays in EUR; the € may sit in a not-yet-loaded node.
+        if (salary_min or salary_max) and not currency:
+            currency = "EUR"
+
+        # Gross/net marker from the salary block class / calculation label
+        salary_type: str | None = None
+        if await item.query_selector("span.salary_bl_net"):
+            salary_type = "net"
+        elif await item.query_selector("span.salary_bl_gross"):
+            salary_type = "gross"
 
         url = href if href.startswith("http") else f"https://ru.cvbankas.lt{href}"
 
@@ -106,6 +118,6 @@ class CVBankasScraper(BaseScraper):
             salary_max=salary_max,
             salary_currency=currency,
             salary_period=salary_period,
+            salary_type=salary_type,
             extra={"raw_salary": raw_salary},
-            
         )

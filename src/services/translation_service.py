@@ -102,7 +102,7 @@ async def _translate_with_cache(
 
     for chunk in _chunk_by_char_quota(missing, quota):
         results = await client.translate_batch(chunk, target_lang=language)
-        for src, dst in zip(chunk, results):
+        for src, dst in zip(chunk, results, strict=False):
             translated_new[src] = dst
 
         if settings.deepl_delay_ms:

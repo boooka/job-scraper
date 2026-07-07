@@ -1,9 +1,6 @@
 """DeepL translation service for vacancy titles and descriptions."""
 from __future__ import annotations
 
-import asyncio
-from typing import Sequence
-
 import httpx
 
 from src.config import settings
