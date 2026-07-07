@@ -654,7 +654,11 @@ class TelegramBotService:
                             text="🔎 Текущие предложения", callback_data=f"sub_show:{r.id}"
                         )
                     ],
-                    [InlineKeyboardButton(text="❌ Отписаться", callback_data=f"sub_cancel:{r.id}")],
+                    [
+                        InlineKeyboardButton(
+                            text="❌ Отписаться", callback_data=f"sub_cancel:{r.id}"
+                        )
+                    ],
                 ]
             )
             await self._send_text(
@@ -1246,12 +1250,7 @@ class TelegramBotService:
                 username = message.from_user.username
                 user_display = f"@{username}" if username else f"id={message.from_user.id}"
                 ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-                report = (
-                    "📝 Обратная связь\n"
-                    f"От: {user_display}\n"
-                    f"Время: {ts}\n\n"
-                    f"{feedback_text}"
-                )
+                report = f"📝 Обратная связь\nОт: {user_display}\nВремя: {ts}\n\n{feedback_text}"
                 async with get_session() as session:
                     repo = TelegramUserRepository(session)
                     admin_chat_ids = await repo.list_last_chat_ids_for_usernames(
