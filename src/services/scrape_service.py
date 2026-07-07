@@ -1,8 +1,8 @@
 """Orchestration: run scraper → persist in batches → track changes → translate."""
+
 from __future__ import annotations
 
 import asyncio
-from typing import Type
 
 from src.config import settings
 from src.db.engine import get_session
@@ -55,12 +55,13 @@ async def _run_translations_bg() -> None:
     """Run translations in background — errors are logged, never propagated."""
     try:
         from src.services.translation_service import run_pending_translations
+
         await run_pending_translations()
     except Exception as exc:
         log.error("translation.bg_failed", error=str(exc))
 
 
-async def run_scrape(scraper_cls: Type[BaseScraper]) -> dict[str, int]:
+async def run_scrape(scraper_cls: type[BaseScraper]) -> dict[str, int]:
     """
     Execute a full scrape cycle for one source.
 
@@ -80,6 +81,7 @@ async def run_scrape(scraper_cls: Type[BaseScraper]) -> dict[str, int]:
         "updated": 0,
         "unchanged": 0,
         "changed": 0,
+        "skipped": 0,
         "deactivated": 0,
     }
     seen_ids: set[str] = set()
@@ -115,6 +117,7 @@ async def run_scrape(scraper_cls: Type[BaseScraper]) -> dict[str, int]:
         # 4. Finalise run log
         async with get_session() as session:
             from sqlalchemy import select
+
             from src.models.orm import ScrapeRun
 
             result = await session.execute(select(ScrapeRun).where(ScrapeRun.id == run_id))
@@ -137,6 +140,7 @@ async def run_scrape(scraper_cls: Type[BaseScraper]) -> dict[str, int]:
 
         async with get_session() as session:
             from sqlalchemy import select
+
             from src.models.orm import ScrapeRun
 
             result = await session.execute(select(ScrapeRun).where(ScrapeRun.id == run_id))

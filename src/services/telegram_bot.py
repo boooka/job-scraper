@@ -1,4 +1,5 @@
 """Telegram bot implemented with aiogram."""
+
 from __future__ import annotations
 
 import json
@@ -7,9 +8,10 @@ import re
 import time
 import traceback
 import uuid
-from datetime import datetime, timedelta, timezone
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
@@ -29,6 +31,7 @@ from aiogram.types import (
 from src.config import settings
 from src.db.engine import get_session
 from src.db.repository import (
+    TelegramDeliveryRepository,
     TelegramSubscriptionRepository,
     TelegramUserRepository,
     VacancySearchRepository,
@@ -47,17 +50,30 @@ class TelegramDebugMiddleware(BaseMiddleware):
         super().__init__()
         self._debug = debug_cb
 
+    def _safe_debug(self, event_name: str, payload: dict[str, Any]) -> None:
+        """Debug logging must never break update processing."""
+        try:
+            self._debug(event_name, payload)
+        except Exception:  # pragma: no cover - diagnostics only
+            pass
+
     async def __call__(
         self,
         handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
-        self._debug("telegram.update", {"event": event.model_dump(mode="json", exclude_none=True)})
+        # mode="python" (not "json"): aiogram embeds `Default` sentinels in some
+        # update fields, which are not JSON-serializable and would otherwise
+        # raise PydanticSerializationError *before* the handler runs, dropping
+        # the update. The downstream json.dumps(default=str) stringifies them.
+        self._safe_debug(
+            "telegram.update", {"event": event.model_dump(mode="python", exclude_none=True)}
+        )
         try:
             return await handler(event, data)
         except Exception as exc:
-            self._debug(
+            self._safe_debug(
                 "telegram.handler_error",
                 {"error": str(exc), "traceback": traceback.format_exc()},
             )
@@ -118,12 +134,34 @@ class TelegramBotService:
     def _tg_debug(self, event: str, payload: dict[str, Any]) -> None:
         if not settings.telegram_debug_logging:
             return
-        self._debug_logger.debug("%s %s", event, json.dumps(payload, ensure_ascii=False, default=str))
+        self._debug_logger.debug(
+            "%s %s", event, json.dumps(payload, ensure_ascii=False, default=str)
+        )
 
     @staticmethod
     def _escape_md(text: str) -> str:
         escaped = text
-        for ch in ("\\", "_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"):
+        for ch in (
+            "\\",
+            "_",
+            "*",
+            "[",
+            "]",
+            "(",
+            ")",
+            "~",
+            "`",
+            ">",
+            "#",
+            "+",
+            "-",
+            "=",
+            "|",
+            "{",
+            "}",
+            ".",
+            "!",
+        ):
             escaped = escaped.replace(ch, f"\\{ch}")
         return escaped
 
@@ -143,6 +181,15 @@ class TelegramBotService:
         # URL can contain characters special for MarkdownV2 in plain text context.
         safe_url = cls._escape_md(url)
         return f"*{safe_title}*\n_{safe_company} \\| {safe_location}_\n{safe_url}"
+
+    @staticmethod
+    def _row_location(row: Any) -> str:
+        """Display label for a vacancy's location — normalised city with its
+        translation when available, otherwise the raw scraped string."""
+        loc = getattr(row, "display_location", None)
+        if loc is None:
+            loc = getattr(row, "location", None)
+        return loc or "Unknown location"
 
     @staticmethod
     def _extract_args(text: str) -> str:
@@ -191,7 +238,12 @@ class TelegramBotService:
         ]
         rows.append([KeyboardButton(text=self.BTN_HELP)])
         if is_admin:
-            rows.append([KeyboardButton(text=self.BTN_ADMIN_SUBS), KeyboardButton(text=self.BTN_ADMIN_STATS)])
+            rows.append(
+                [
+                    KeyboardButton(text=self.BTN_ADMIN_SUBS),
+                    KeyboardButton(text=self.BTN_ADMIN_STATS),
+                ]
+            )
         return ReplyKeyboardMarkup(
             keyboard=rows,
             resize_keyboard=True,
@@ -200,6 +252,33 @@ class TelegramBotService:
 
     async def send_message_public(self, chat_id: int, text: str) -> None:
         await self._send_text(chat_id, text, markdown=False)
+
+    async def close(self) -> None:
+        """Close the underlying aiohttp session.
+
+        For throwaway service instances created just to push a message from the
+        scheduler process (see subscription_notifier / admin_notifier); the
+        long-running polling instance manages its own session lifecycle.
+        """
+        await self.bot.session.close()
+
+    async def notify_admins(self, text: str) -> int:
+        """Send a plain-text message to every configured admin's last chat.
+
+        Best-effort: failures per admin are logged, never raised. Returns the
+        number of admins successfully notified.
+        """
+        async with get_session() as session:
+            repo = TelegramUserRepository(session)
+            chat_ids = await repo.list_last_chat_ids_for_usernames(self._admin_usernames)
+        sent = 0
+        for chat_id in chat_ids:
+            try:
+                await self._send_text(chat_id, text, markdown=False)
+                sent += 1
+            except Exception as exc:
+                self._tg_debug("admin_notify.failed", {"chat_id": chat_id, "error": str(exc)})
+        return sent
 
     async def _is_admin(self, message: Message) -> bool:
         user = message.from_user
@@ -215,12 +294,18 @@ class TelegramBotService:
             self._tg_debug("telegram.get_chat_member_failed", {"error": str(exc)})
             return False
 
+    @staticmethod
+    def _user_display(user: User) -> str:
+        name = " ".join(p for p in (user.first_name, user.last_name) if p)
+        handle = f"@{user.username}" if user.username else f"id={user.id}"
+        return f"{name} ({handle})" if name else handle
+
     async def _remember_user(self, user: User | None, chat_id: int | None = None) -> None:
         if user is None:
             return
         async with get_session() as session:
             repo = TelegramUserRepository(session)
-            await repo.upsert_user(
+            _, created = await repo.upsert_user(
                 telegram_user_id=user.id,
                 username=user.username,
                 first_name=user.first_name,
@@ -229,6 +314,17 @@ class TelegramBotService:
                 is_bot=user.is_bot,
                 is_premium=user.is_premium,
                 last_chat_id=chat_id,
+            )
+        # Alert admins the first time a real (non-bot, non-admin) user appears
+        if (
+            created
+            and settings.admin_notify_new_users
+            and not user.is_bot
+            and (user.username or "").lower() not in self._admin_usernames
+        ):
+            ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+            await self.notify_admins(
+                f"👤 Новый пользователь бота\n{self._user_display(user)}\nВремя: {ts}"
             )
 
     @staticmethod
@@ -323,7 +419,7 @@ class TelegramBotService:
         parsed = parse_search_query(query) if query else parse_search_query("")
         published_from: datetime | None = None
         if ctx["date_days"]:
-            published_from = datetime.now(timezone.utc) - timedelta(days=int(ctx["date_days"]))
+            published_from = datetime.now(UTC) - timedelta(days=int(ctx["date_days"]))
         started = time.perf_counter()
         is_admin = await self._is_admin_user(message.chat.id, effective_user)
         async with get_session() as session:
@@ -420,6 +516,25 @@ class TelegramBotService:
                 reply_markup=self._search_controls_keyboard(session_token, has_more=True),
             )
 
+        # Seed the filter context with this phrase and offer to refine it, so a
+        # plain phrase search can be narrowed by location / salary / date.
+        if message.from_user is not None:
+            self._get_context(message.from_user.id)["query"] = query_raw
+            await self._send_text(
+                message.chat.id,
+                TelegramMessages.REFINE_WITH_FILTERS,
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="🧩 Уточнить фильтрами", callback_data="ctx:open"
+                            )
+                        ]
+                    ]
+                ),
+                markdown=False,
+            )
+
         elapsed_ms = (time.perf_counter() - started) * 1000
         metrics_registry.observe_ms("search_latency_ms", elapsed_ms)
         metrics_registry.observe_search_query_latency(query_raw, elapsed_ms)
@@ -436,17 +551,62 @@ class TelegramBotService:
             card = self._format_vacancy_card_md(
                 title=getattr(row, "title", "") or "Untitled",
                 company=getattr(row, "company_name", "") or "Unknown company",
-                location=getattr(row, "location", "") or "Unknown location",
+                location=self._row_location(row),
                 url=getattr(row, "url", ""),
             )
             url = getattr(row, "url", "")
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text="Открыть вакансию", url=url)],
-                    [InlineKeyboardButton(text="Подписаться на этот запрос", callback_data=f"subq:{token}")],
+                    [
+                        InlineKeyboardButton(
+                            text="Подписаться на этот запрос", callback_data=f"subq:{token}"
+                        )
+                    ],
                 ]
             )
             await self._send_text(chat_id, card, markdown=True, reply_markup=keyboard)
+
+    async def _send_result_set(self, *, chat_id: int, rows: list[Any], query_raw: str) -> None:
+        """Send a result set: inline for a few, paginated for many."""
+        if not rows:
+            await self._send_text(chat_id, TelegramMessages.NOTHING_FOUND)
+            return
+        total = len(rows)
+        show_all_threshold = max(1, settings.telegram_search_show_all_threshold)
+        next_batch_size = max(1, settings.telegram_search_next_batch_size)
+        if total <= show_all_threshold:
+            await self._send_rows(chat_id=chat_id, rows=rows, query_raw=query_raw)
+            return
+        session_token = uuid.uuid4().hex[:12]
+        self._search_sessions[session_token] = {
+            "chat_id": chat_id,
+            "query_raw": query_raw,
+            "rows": rows,
+            "offset": 1,
+        }
+        await self._send_rows(chat_id=chat_id, rows=rows[:1], query_raw=query_raw)
+        await self._send_text(
+            chat_id,
+            TelegramMessages.search_many_found(total=total, next_count=next_batch_size),
+            reply_markup=self._search_controls_keyboard(session_token, has_more=True),
+        )
+
+    async def _show_subscription_matches(self, chat_id: int, query_raw: str) -> None:
+        """Run a subscription's query on demand and show the current matches."""
+        parsed = parse_search_query(query_raw)
+        async with get_session() as session:
+            repo = VacancySearchRepository(session)
+            rows = await repo.search(
+                includes=parsed.includes,
+                excludes=parsed.excludes,
+                fuzzy=parsed.fuzzy,
+                regex=None,
+                language=settings.deepl_target_lang,
+                limit=settings.telegram_search_limit,
+                is_admin=False,
+            )
+        await self._send_result_set(chat_id=chat_id, rows=list(rows), query_raw=query_raw)
 
     @staticmethod
     def _search_controls_keyboard(session_token: str, *, has_more: bool) -> InlineKeyboardMarkup:
@@ -460,21 +620,79 @@ class TelegramBotService:
                     )
                 ]
             )
-        rows.append([InlineKeyboardButton(text="Показать все", callback_data=f"s_all:{session_token}")])
+        rows.append(
+            [InlineKeyboardButton(text="Показать все", callback_data=f"s_all:{session_token}")]
+        )
         return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _notify_new_subscription(
+        self, user: User | None, sub_id: int, query_raw: str
+    ) -> None:
+        """Alert admins when a (non-admin) user creates a subscription."""
+        if not settings.admin_notify_new_subscriptions or user is None:
+            return
+        if (user.username or "").lower() in self._admin_usernames:
+            return
+        query_preview = query_raw if len(query_raw) <= 120 else query_raw[:120] + "…"
+        await self.notify_admins(
+            f"⭐ Новая подписка #{sub_id}\n{self._user_display(user)}\nЗапрос: {query_preview}"
+        )
+
+    async def _create_subscription(
+        self, user: User, chat_id: int, query_raw: str
+    ) -> tuple[int, bool]:
+        """Create a subscription (deduped) and seed its delivery log.
+
+        Returns ``(subscription_id, created)``. On create, the current matches
+        are marked as already delivered so the periodic notifier only pushes
+        genuinely new vacancies from now on — instead of flooding the user with
+        every existing match on the next run.
+        """
+        async with get_session() as session:
+            sub_repo = TelegramSubscriptionRepository(session)
+            existing = await sub_repo.find_active_by_query(user.id, query_raw)
+            if existing is not None:
+                return existing.id, False
+
+            sub = await sub_repo.add(
+                telegram_user_id=user.id,
+                username=user.username,
+                chat_id=chat_id,
+                query=query_raw,
+            )
+            await self._seed_subscription_deliveries(session, sub.id, query_raw)
+            return sub.id, True
+
+    async def _seed_subscription_deliveries(
+        self, session: Any, subscription_id: int, query_raw: str
+    ) -> None:
+        """Mark all current matches as delivered (no message sent)."""
+        parsed = parse_search_query(query_raw)
+        search_repo = VacancySearchRepository(session)
+        delivery_repo = TelegramDeliveryRepository(session)
+        rows = await search_repo.search(
+            includes=parsed.includes,
+            excludes=parsed.excludes,
+            fuzzy=parsed.fuzzy,
+            regex=None,
+            language=settings.deepl_target_lang,
+            limit=settings.telegram_search_limit,
+            is_admin=False,
+        )
+        for row in rows:
+            await delivery_repo.mark_sent(subscription_id, row.id)
 
     async def _execute_subscribe(self, message: Message, query_raw: str) -> None:
         if message.from_user is None:
             return
-        async with get_session() as session:
-            repo = TelegramSubscriptionRepository(session)
-            sub = await repo.add(
-                telegram_user_id=message.from_user.id,
-                username=message.from_user.username,
-                chat_id=message.chat.id,
-                query=query_raw,
-            )
-        await self._send_text(message.chat.id, TelegramMessages.subscription_created(sub.id))
+        sub_id, created = await self._create_subscription(
+            message.from_user, message.chat.id, query_raw
+        )
+        if created:
+            await self._send_text(message.chat.id, TelegramMessages.subscription_created(sub_id))
+            await self._notify_new_subscription(message.from_user, sub_id, query_raw)
+        else:
+            await self._send_text(message.chat.id, TelegramMessages.subscription_exists(sub_id))
 
     def _register_handlers(self) -> None:
         @self.router.message(Command("start"))
@@ -520,10 +738,29 @@ class TelegramBotService:
             if not rows:
                 await self._send_text(message.chat.id, TelegramMessages.NO_SUBSCRIPTIONS)
                 return
-            await self._send_text(
-                message.chat.id,
-                TelegramMessages.user_subscriptions([f"#{r.id}: {r.query}" for r in rows]),
-            )
+            await self._send_text(message.chat.id, TelegramMessages.SUBSCRIPTIONS_HEADER)
+            for r in rows:
+                keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="🔎 Текущие предложения",
+                                callback_data=f"sub_show:{r.id}",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text="❌ Отписаться", callback_data=f"sub_cancel:{r.id}"
+                            )
+                        ],
+                    ]
+                )
+                await self._send_text(
+                    message.chat.id,
+                    f"#{r.id}: {r.query}",
+                    reply_markup=keyboard,
+                    markdown=False,
+                )
 
         @self.router.message(Command("unsubscribe"))
         async def _unsubscribe(message: Message) -> None:
@@ -583,7 +820,10 @@ class TelegramBotService:
             lines.extend(
                 ["- (empty)"]
                 if not top
-                else [f"- {latency:.2f} ms | {(query[:80] + ('...' if len(query) > 80 else ''))}" for query, latency in top]
+                else [
+                    f"- {latency:.2f} ms | {(query[:80] + ('...' if len(query) > 80 else ''))}"
+                    for query, latency in top
+                ]
             )
             await self._send_text(message.chat.id, "\n".join(lines))
 
@@ -616,9 +856,15 @@ class TelegramBotService:
                     return
                 user_id = callback.from_user.id
                 ctx = self._get_context(user_id)
+                if data == "ctx:open":
+                    await self._open_context_menu(callback.message, user_id=user_id)
+                    await callback.answer()
+                    return
                 if data == "ctx:set:query":
                     self._pending_user_action[user_id] = "ctx_query"
-                    await self._send_text(callback.message.chat.id, TelegramMessages.ASK_CONTEXT_QUERY)
+                    await self._send_text(
+                        callback.message.chat.id, TelegramMessages.ASK_CONTEXT_QUERY
+                    )
                     await callback.answer()
                     return
                 if data == "ctx:set:location":
@@ -657,7 +903,9 @@ class TelegramBotService:
                             ctx["location"] = choices[idx]
                             await self._open_context_menu(callback.message, user_id=user_id)
                             if ctx["auto_search"]:
-                                await self._run_context_search(callback.message, user=callback.from_user)
+                                await self._run_context_search(
+                                    callback.message, user=callback.from_user
+                                )
                     await callback.answer()
                     return
                 if data == "ctx:set:date7":
@@ -717,7 +965,9 @@ class TelegramBotService:
                         ctx["salary_from"] = int(amount)
                         await self._open_context_menu(callback.message, user_id=user_id)
                         if ctx["auto_search"]:
-                            await self._run_context_search(callback.message, user=callback.from_user)
+                            await self._run_context_search(
+                                callback.message, user=callback.from_user
+                            )
                     await callback.answer()
                     return
                 if data.startswith("ctx:salary_to:"):
@@ -727,22 +977,30 @@ class TelegramBotService:
                         ctx["salary_to"] = int(amount)
                         await self._open_context_menu(callback.message, user_id=user_id)
                         if ctx["auto_search"]:
-                            await self._run_context_search(callback.message, user=callback.from_user)
+                            await self._run_context_search(
+                                callback.message, user=callback.from_user
+                            )
                     await callback.answer()
                     return
                 if data == "ctx:salary:input_from":
                     self._pending_user_action[user_id] = "ctx_salary_from"
-                    await self._send_text(callback.message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_FROM)
+                    await self._send_text(
+                        callback.message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_FROM
+                    )
                     await callback.answer()
                     return
                 if data == "ctx:salary:input_to":
                     self._pending_user_action[user_id] = "ctx_salary_to"
-                    await self._send_text(callback.message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_TO)
+                    await self._send_text(
+                        callback.message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_TO
+                    )
                     await callback.answer()
                     return
                 if data == "ctx:salary:input_range":
                     self._pending_user_action[user_id] = "ctx_salary_range"
-                    await self._send_text(callback.message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_RANGE)
+                    await self._send_text(
+                        callback.message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_RANGE
+                    )
                     await callback.answer()
                     return
                 if data == "ctx:auto":
@@ -807,6 +1065,32 @@ class TelegramBotService:
                     await self._send_text(callback.message.chat.id, "Показаны все объявления.")
                 await callback.answer()
                 return
+            if data.startswith("sub_show:") or data.startswith("sub_cancel:"):
+                prefix, _, raw_id = data.partition(":")
+                if callback.message is None or callback.from_user is None or not raw_id.isdigit():
+                    await callback.answer()
+                    return
+                sub_id = int(raw_id)
+                if prefix == "sub_show":
+                    async with get_session() as session:
+                        repo = TelegramSubscriptionRepository(session)
+                        sub = await repo.get_active_for_user(sub_id, callback.from_user.id)
+                    if sub is None:
+                        await callback.answer("Подписка не найдена")
+                        return
+                    await callback.answer()
+                    await self._show_subscription_matches(callback.message.chat.id, sub.query)
+                else:  # sub_cancel
+                    async with get_session() as session:
+                        repo = TelegramSubscriptionRepository(session)
+                        ok = await repo.cancel_for_user(sub_id, callback.from_user.id)
+                    await callback.answer("Подписка отменена" if ok else "Не найдено")
+                    if ok:
+                        await self._send_text(
+                            callback.message.chat.id,
+                            TelegramMessages.subscription_cancelled(True),
+                        )
+                return
             if not data.startswith("subq:"):
                 await callback.answer()
                 return
@@ -815,16 +1099,24 @@ class TelegramBotService:
             if not query_raw or callback.from_user is None or callback.message is None:
                 await callback.answer()
                 return
-            async with get_session() as session:
-                repo = TelegramSubscriptionRepository(session)
-                sub = await repo.add(
-                    telegram_user_id=callback.from_user.id,
-                    username=callback.from_user.username,
-                    chat_id=callback.message.chat.id,
-                    query=query_raw,
-                )
+            sub_id, created = await self._create_subscription(
+                callback.from_user, callback.message.chat.id, query_raw
+            )
             self._pending_inline_queries.pop(token, None)
-            await callback.answer(text=f"Подписка #{sub.id} создана")
+            # Toast (fast feedback) + a persistent chat message (so it is not missed)
+            await callback.answer(
+                text=f"Подписка #{sub_id} создана" if created else "Подписка уже существует",
+                show_alert=False,
+            )
+            if created:
+                await self._send_text(
+                    callback.message.chat.id, TelegramMessages.subscription_created(sub_id)
+                )
+                await self._notify_new_subscription(callback.from_user, sub_id, query_raw)
+            else:
+                await self._send_text(
+                    callback.message.chat.id, TelegramMessages.subscription_exists(sub_id)
+                )
 
         @self.router.message()
         async def _pending_text(message: Message) -> None:
@@ -872,8 +1164,12 @@ class TelegramBotService:
                 if message.text.strip().isdigit():
                     async with get_session() as session:
                         repo = TelegramSubscriptionRepository(session)
-                        ok = await repo.cancel_for_user(int(message.text.strip()), message.from_user.id)
-                    await self._send_text(message.chat.id, TelegramMessages.subscription_cancelled(ok))
+                        ok = await repo.cancel_for_user(
+                            int(message.text.strip()), message.from_user.id
+                        )
+                    await self._send_text(
+                        message.chat.id, TelegramMessages.subscription_cancelled(ok)
+                    )
                 else:
                     await self._send_text(message.chat.id, "Нужен числовой ID подписки.")
             elif action == "feedback":
@@ -885,7 +1181,7 @@ class TelegramBotService:
                     return
                 username = message.from_user.username
                 user_display = f"@{username}" if username else f"id={message.from_user.id}"
-                ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
                 report = (
                     "📝 Обратная связь\n"
                     f"От: {user_display}\n"
@@ -894,7 +1190,9 @@ class TelegramBotService:
                 )
                 async with get_session() as session:
                     repo = TelegramUserRepository(session)
-                    admin_chat_ids = await repo.list_last_chat_ids_for_usernames(self._admin_usernames)
+                    admin_chat_ids = await repo.list_last_chat_ids_for_usernames(
+                        self._admin_usernames
+                    )
                 for chat_id in admin_chat_ids:
                     await self._send_text(chat_id, report, markdown=False)
                 await self._send_text(message.chat.id, TelegramMessages.FEEDBACK_SENT)
@@ -948,7 +1246,9 @@ class TelegramBotService:
                     if ctx["auto_search"]:
                         await self._run_context_search(message)
                 else:
-                    await self._send_text(message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_RANGE)
+                    await self._send_text(
+                        message.chat.id, TelegramMessages.ASK_CONTEXT_SALARY_RANGE
+                    )
 
     async def run(self) -> None:
         log.info("telegram.bot_started", framework="aiogram")

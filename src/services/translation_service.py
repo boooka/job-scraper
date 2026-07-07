@@ -5,6 +5,7 @@ Triggered automatically after each scrape batch via run_pending_translations().
 Finds vacancies without a Russian translation and translates title + description
 via DeepL, writing results to vacancy_translations.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -102,7 +103,7 @@ async def _translate_with_cache(
 
     for chunk in _chunk_by_char_quota(missing, quota):
         results = await client.translate_batch(chunk, target_lang=language)
-        for src, dst in zip(chunk, results):
+        for src, dst in zip(chunk, results, strict=False):
             translated_new[src] = dst
 
         if settings.deepl_delay_ms:
@@ -187,10 +188,7 @@ async def _translate_jobs(
             log.warning("deepl.descriptions_failed", error=str(exc))
             # Continue — titles are more important, descriptions are optional
 
-    return [
-        (job, translated_titles[i], translated_descriptions[i])
-        for i, job in enumerate(jobs)
-    ]
+    return [(job, translated_titles[i], translated_descriptions[i]) for i, job in enumerate(jobs)]
 
 
 async def run_pending_translations(language: str | None = None) -> dict[str, int]:

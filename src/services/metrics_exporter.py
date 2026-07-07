@@ -1,8 +1,9 @@
 """Persist runtime metrics to disk as JSONL snapshots."""
+
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from src.config import settings
@@ -15,7 +16,7 @@ log = get_logger(__name__)
 async def dump_metrics_to_disk() -> None:
     snapshot = metrics_registry.snapshot()
     payload = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "cache_hits": snapshot.cache_hits,
         "cache_misses": snapshot.cache_misses,
         "cache_hit_rate": snapshot.cache_hit_rate,

@@ -1,4 +1,5 @@
 """Telegram message templates for easy localization and UX updates."""
+
 from __future__ import annotations
 
 
@@ -14,7 +15,7 @@ class TelegramMessages:
             "/admin_subscriptions - все подписчики (только админ)\n"
             "/admin_stats - статистика рассылки/метрик (только админ)\n\n"
             "Синтаксис запроса:\n"
-            "  слово или \"фраза\" - включить (AND)\n"
+            '  слово или "фраза" - включить (AND)\n'
             "  -слово - исключить\n"
             "  ~шаблон* - нечеткое совпадение (* как wildcard)\n"
             "  /regex/ - регулярка (только админ)"
@@ -49,14 +50,28 @@ class TelegramMessages:
     ASK_CONTEXT_SALARY_RANGE = "Введите диапазон в формате: <от> <до>"
     CONTEXT_RESET = "Контекст поиска очищен."
     CONTEXT_EMPTY = "Контекст пуст."
+    REFINE_WITH_FILTERS = "Уточнить результат фильтрами (локация, зарплата, дата)?"
 
     @staticmethod
     def subscription_created(sub_id: int) -> str:
-        return f"Подписка создана: #{sub_id}"
+        return (
+            f"✅ Подписка создана: #{sub_id}\n"
+            "Буду присылать только новые вакансии по этому запросу. "
+            "Текущие предложения смотрите в «📋 Мои подписки»."
+        )
+
+    @staticmethod
+    def subscription_exists(sub_id: int) -> str:
+        return (
+            f"У вас уже есть активная подписка #{sub_id} на этот запрос. "
+            "Текущие предложения — в «📋 Мои подписки»."
+        )
 
     @staticmethod
     def subscription_cancelled(ok: bool) -> str:
         return "Подписка отменена." if ok else TelegramMessages.SUBSCRIPTION_NOT_FOUND
+
+    SUBSCRIPTIONS_HEADER = "Ваши подписки:"
 
     @staticmethod
     def user_subscriptions(lines: list[str]) -> str:
@@ -99,4 +114,3 @@ class TelegramMessages:
             f"- зарплата до: {salary_to if salary_to is not None else '-'}\n"
             f"- автопоиск: {'вкл' if auto_search else 'выкл'}"
         )
-
