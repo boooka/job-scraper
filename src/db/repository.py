@@ -185,8 +185,31 @@ class VacancyRepository:
         Insert or update a vacancy, auto-upserting its company.
 
         Returns:
-            (action, changes) where action is 'created' | 'updated' | 'unchanged'
+            (action, changes) where action is
+            'created' | 'updated' | 'unchanged' | 'skipped'
         """
+        # ── Integrity guard ────────────────────────────────────────────────
+        # A parser bug can yield a blank external_id or a URL that fell back to
+        # the site root (no path). A blank/duplicate external_id collapses many
+        # distinct vacancies into a single row — every scrape then rewrites it,
+        # producing thousands of bogus change records (see the cvonline
+        # ""/https://cvonline.lt incident). Drop such items instead of writing
+        # them, so one scraper regression can never corrupt the table again and
+        # an already-good row is never overwritten with garbage.
+        if not (data.external_id or "").strip():
+            log.warning(
+                "vacancy.skipped_blank_external_id", source=data.source, url=data.url
+            )
+            return "skipped", []
+        if _is_rootlike_url(data.url):
+            log.warning(
+                "vacancy.skipped_rootlike_url",
+                source=data.source,
+                external_id=data.external_id,
+                url=data.url,
+            )
+            return "skipped", []
+
         # Resolve company FK when a company name is present
         company_id: uuid.UUID | None = None
         if data.company:
@@ -970,6 +993,15 @@ class StatsRepository:
 # ------------------------------------------------------------------
 # Internal helpers
 # ------------------------------------------------------------------
+
+# Scheme + host with at most a trailing slash and no path/query — the signature
+# of a scraper that lost the vacancy href and fell back to the site root.
+_ROOTLIKE_URL_RE = re.compile(r"^https?://[^/]+/?$", re.IGNORECASE)
+
+
+def _is_rootlike_url(url: str | None) -> bool:
+    return bool(url) and _ROOTLIKE_URL_RE.match(url.strip()) is not None
+
 
 def _synthetic_company_id(source: str, name: str) -> str:
     """Stable synthetic external_id for companies without a site-assigned ID."""

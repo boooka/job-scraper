@@ -184,6 +184,50 @@ async def test_daily_report_counts_and_stale_flag(db_session):
 
 
 @pytest.mark.asyncio
+async def test_upsert_skips_blank_external_id_and_rootlike_url(db_session):
+    v_repo = VacancyRepository(db_session)
+
+    # Blank external_id would collapse many vacancies into one row → skip
+    action, changes = await v_repo.upsert_vacancy(
+        _vacancy(external_id="", url="https://cvonline.lt/vacancy/1/x")
+    )
+    assert action == "skipped"
+    assert changes == []
+
+    # URL that fell back to the site root (no path) → skip
+    action, _ = await v_repo.upsert_vacancy(
+        _vacancy(external_id="42", url="https://cvonline.lt")
+    )
+    assert action == "skipped"
+
+    # Nothing was written for either
+    rows = (await db_session.execute(select(Vacancy))).scalars().all()
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_rootlike_url_does_not_overwrite_existing_good_row(db_session):
+    v_repo = VacancyRepository(db_session)
+    action, _ = await v_repo.upsert_vacancy(
+        _vacancy(external_id="777", title="Good title",
+                 url="https://cvonline.lt/vacancy/777/company/good")
+    )
+    assert action == "created"
+
+    # A later mis-parse of the same id with a root URL must not clobber it
+    action, _ = await v_repo.upsert_vacancy(
+        _vacancy(external_id="777", title="Broken", url="https://cvonline.lt")
+    )
+    assert action == "skipped"
+
+    row = (
+        await db_session.execute(select(Vacancy).where(Vacancy.external_id == "777"))
+    ).scalar_one()
+    assert row.title == "Good title"
+    assert row.url == "https://cvonline.lt/vacancy/777/company/good"
+
+
+@pytest.mark.asyncio
 async def test_city_get_or_create_is_idempotent_and_cached(db_session):
     from src.models.orm import City
 

@@ -80,6 +80,7 @@ async def run_scrape(scraper_cls: Type[BaseScraper]) -> dict[str, int]:
         "updated": 0,
         "unchanged": 0,
         "changed": 0,
+        "skipped": 0,
         "deactivated": 0,
     }
     seen_ids: set[str] = set()
