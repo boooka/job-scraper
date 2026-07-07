@@ -15,6 +15,7 @@ from src.scrapers.cv import CVScraper
 from src.scrapers.cvbankas import CVBankasScraper
 from src.scrapers.cvmarket import CVMarketScraper
 from src.scrapers.cvonline import CVOnlineScraper
+from src.services.admin_notifier import run_daily_admin_report
 from src.services.metrics_exporter import dump_metrics_to_disk
 from src.services.scrape_service import run_scrape
 from src.services.subscription_notifier import run_subscription_notifications
@@ -101,6 +102,16 @@ def create_scheduler() -> AsyncIOScheduler:
             name="Telegram subscription notifications",
             max_instances=1,
             misfire_grace_time=300,
+        )
+
+        # Daily health report: added/translated counts + stale-scraper alert
+        scheduler.add_job(
+            run_daily_admin_report,
+            trigger=_parse_cron(settings.schedule_daily_report),
+            id="daily_report",
+            name="Daily admin health report",
+            max_instances=1,
+            misfire_grace_time=3600,
         )
 
     scheduler.add_job(

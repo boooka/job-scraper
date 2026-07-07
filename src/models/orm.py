@@ -60,6 +60,43 @@ class Company(Base):
         return f"<Company {self.source}:{self.name!r}>"
 
 
+class City(Base):
+    """Normalised location dictionary.
+
+    ``name_en`` is the canonical (Latin/English) spelling and is always set.
+    ``name_translated`` holds the Russian rendering when known. Different
+    source spellings ("Вильнюс" vs "Vilnius") resolve to a single row so a
+    vacancy's location is displayed consistently.
+    """
+
+    __tablename__ = "cities"
+    __table_args__ = (
+        UniqueConstraint("name_en", name="uq_city_name_en"),
+        Index("ix_cities_name_translated", "name_translated"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name_en: Mapped[str] = mapped_column(String(255), nullable=False)
+    name_translated: Mapped[str | None] = mapped_column(String(255))
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    vacancies: Mapped[list[Vacancy]] = relationship("Vacancy", back_populates="city")
+
+    @property
+    def display_name(self) -> str:
+        """Preferred label: translation when present, otherwise English name."""
+        return self.name_translated or self.name_en
+
+    def __repr__(self) -> str:
+        return f"<City {self.name_en!r} ({self.name_translated or '-'})>"
+
+
 class Vacancy(Base):
     """A job vacancy scraped from an external source."""
 
@@ -70,6 +107,7 @@ class Vacancy(Base):
         Index("ix_vacancies_is_active", "is_active"),
         Index("ix_vacancies_last_seen_at", "last_seen_at"),
         Index("ix_vacancies_company_id", "company_id"),
+        Index("ix_vacancies_city_id", "city_id"),
         Index("ix_vacancies_welcome_ukraine", "welcome_ukraine"),
     )
 
@@ -84,6 +122,11 @@ class Vacancy(Base):
         UUID(as_uuid=True), ForeignKey("companies.id", ondelete="SET NULL"), nullable=True
     )
     company_name: Mapped[str | None] = mapped_column(String(255))  # denorm for quick display
+
+    # Normalised city FK (raw `location` string is kept as the scraped source-of-truth)
+    city_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("cities.id", ondelete="SET NULL"), nullable=True
+    )
 
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     location: Mapped[str | None] = mapped_column(String(255))
@@ -110,12 +153,24 @@ class Vacancy(Base):
     )
 
     company_ref: Mapped[Company | None] = relationship("Company", back_populates="vacancies")
+    city: Mapped[City | None] = relationship("City", back_populates="vacancies")
     changes: Mapped[list[VacancyChange]] = relationship(
         "VacancyChange", back_populates="vacancy", cascade="all, delete-orphan"
     )
     translations: Mapped[list[VacancyTranslation]] = relationship(
         "VacancyTranslation", back_populates="vacancy", cascade="all, delete-orphan"
     )
+
+    @property
+    def display_location(self) -> str | None:
+        """City label preferring the translation; falls back to raw location.
+
+        Note: accessing ``self.city`` requires it to be eager-loaded when used
+        from an async session (use ``selectinload(Vacancy.city)``).
+        """
+        if self.city is not None:
+            return self.city.display_name
+        return self.location
 
     def __repr__(self) -> str:
         return f"<Vacancy {self.source}:{self.external_id} '{self.title}'>"

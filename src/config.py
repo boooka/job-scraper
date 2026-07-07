@@ -8,6 +8,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
  
     # Database
@@ -30,6 +31,13 @@ class Settings(BaseSettings):
     schedule_cv: str = Field(default="0 1 * * *")
     schedule_translations: str = Field(default="*/15 * * * *")  # every 15 min
     schedule_subscription_notifications: str = Field(default="*/10 * * * *")
+    schedule_daily_report: str = Field(default="0 9 * * *")  # daily admin health report
+
+    # Admin notifications
+    admin_notify_new_users: bool = Field(default=True)
+    admin_notify_new_subscriptions: bool = Field(default=True)
+    # Hours without any new vacancy that trigger a "stale" alert in the report
+    daily_report_stale_hours: int = Field(default=24)
  
     # Retry
     retry_max_attempts: int = Field(default=3)

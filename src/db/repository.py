@@ -8,10 +8,13 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
 
 from sqlalchemy import and_, func, literal, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.logger import get_logger
 from src.models.orm import (
+    City,
     Company,
     ScrapeRun,
     TelegramSubscription,
@@ -23,6 +26,7 @@ from src.models.orm import (
     VacancyTranslation,
 )
 from src.models.schemas import VacancyData
+from src.services.city_normalizer import normalize_city
 
 log = get_logger(__name__)
 
@@ -109,12 +113,72 @@ class CompanyRepository:
             self._session.add(company)
 
 
+class CityRepository:
+    """Resolve raw location strings to normalised City rows."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        # Per-instance cache: within one batch the same city repeats hundreds of
+        # times, so avoid re-querying it for every vacancy.
+        self._cache: dict[str, City] = {}
+
+    async def _select_by_name(self, name_en: str) -> City | None:
+        result = await self._session.execute(select(City).where(City.name_en == name_en))
+        return result.scalar_one_or_none()
+
+    def _backfill_translation(self, city: City, name_translated: str | None) -> None:
+        if name_translated and not city.name_translated:
+            city.name_translated = name_translated
+            self._session.add(city)
+
+    async def get_or_create(self, name_en: str, name_translated: str | None) -> City:
+        """Return the City with this canonical English name, creating if absent.
+
+        If an existing row lacks a translation and one is now known, it is
+        backfilled so later scrapes enrich earlier rows. Concurrent scrapers may
+        try to insert the same brand-new city at once; the INSERT is wrapped in a
+        SAVEPOINT so a unique-constraint race is recovered by re-reading the row
+        the other transaction committed, instead of aborting the whole batch.
+        """
+        cached = self._cache.get(name_en)
+        if cached is not None:
+            self._backfill_translation(cached, name_translated)
+            return cached
+
+        city = await self._select_by_name(name_en)
+        if city is None:
+            city = City(name_en=name_en, name_translated=name_translated)
+            try:
+                async with self._session.begin_nested():
+                    self._session.add(city)
+                    await self._session.flush()
+                log.debug("city.created", name_en=name_en)
+            except IntegrityError:
+                # Lost the race — another transaction inserted it first.
+                city = await self._select_by_name(name_en)
+                if city is None:  # pragma: no cover - only if the row truly vanished
+                    raise
+
+        self._backfill_translation(city, name_translated)
+        self._cache[name_en] = city
+        return city
+
+    async def resolve(self, raw_location: str | None) -> City | None:
+        """Normalise a raw location string and return its City (or None)."""
+        normalized = normalize_city(raw_location)
+        if normalized is None:
+            return None
+        name_en, name_translated = normalized
+        return await self.get_or_create(name_en, name_translated)
+
+
 class VacancyRepository:
     """All DB operations for vacancies."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._company_repo = CompanyRepository(session)
+        self._city_repo = CityRepository(session)
 
     async def upsert_vacancy(self, data: VacancyData) -> tuple[str, list[VacancyChange]]:
         """
@@ -132,6 +196,10 @@ class VacancyRepository:
             )
             company_id = company.id
 
+        # Resolve normalised city FK from the raw location string
+        city = await self._city_repo.resolve(data.location)
+        city_id: int | None = city.id if city else None
+
         # Load existing vacancy
         stmt = select(Vacancy).where(
             Vacancy.source == data.source,
@@ -146,6 +214,7 @@ class VacancyRepository:
                 external_id=data.external_id,
                 company_id=company_id,
                 company_name=data.company,
+                city_id=city_id,
                 title=data.title,
                 location=data.location,
                 url=data.url,
@@ -180,6 +249,10 @@ class VacancyRepository:
         # Sync company FK if it changed
         if company_id and existing.company_id != company_id:
             update_fields["company_id"] = company_id
+
+        # Sync normalised city FK if it changed
+        if existing.city_id != city_id:
+            update_fields["city_id"] = city_id
 
         # Map VacancyData field → Vacancy column name
         schema_to_col: dict[str, str] = {
@@ -444,7 +517,12 @@ class TelegramUserRepository:
         is_bot: bool,
         is_premium: bool | None,
         last_chat_id: int | None,
-    ) -> TelegramUser:
+    ) -> tuple[TelegramUser, bool]:
+        """Insert or update a Telegram user.
+
+        Returns ``(user, created)`` where ``created`` is True only on first
+        sight of this telegram_user_id — used to fire the new-user admin alert.
+        """
         stmt = select(TelegramUser).where(TelegramUser.telegram_user_id == telegram_user_id)
         result = await self._session.execute(stmt)
         user = result.scalar_one_or_none()
@@ -463,7 +541,7 @@ class TelegramUserRepository:
             )
             self._session.add(user)
             await self._session.flush()
-            return user
+            return user, True
 
         user.username = username
         user.first_name = first_name
@@ -475,7 +553,7 @@ class TelegramUserRepository:
         user.last_seen_at = now
         self._session.add(user)
         await self._session.flush()
-        return user
+        return user, False
 
     async def list_last_chat_ids_for_usernames(self, usernames: set[str]) -> list[int]:
         if not usernames:
@@ -523,6 +601,25 @@ class VacancySearchRepository:
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    @staticmethod
+    def _apply_location_filter(stmt: Any, loc: str) -> Any:
+        """Match a location term against the raw string and the normalised city.
+
+        Users may type either language ("Vilnius" or "Вильнюс"); we match the
+        raw ``location``, both city name columns, and the resolved canonical
+        English name so cross-language input still works.
+        """
+        normalized = normalize_city(loc)
+        canonical_en = normalized[0] if normalized else None
+        conditions = [
+            func.coalesce(Vacancy.location, "").ilike(f"%{loc}%"),
+            func.coalesce(City.name_en, "").ilike(f"%{loc}%"),
+            func.coalesce(City.name_translated, "").ilike(f"%{loc}%"),
+        ]
+        if canonical_en:
+            conditions.append(City.name_en == canonical_en)
+        return stmt.outerjoin(City, City.id == Vacancy.city_id).where(or_(*conditions))
 
     @staticmethod
     def _fuzzy_to_sql_like(term: str) -> str:
@@ -605,6 +702,7 @@ class VacancySearchRepository:
         stmt = (
             select(Vacancy, rank_expr.label("rank"))
             .outerjoin(translations_subq, translations_subq.c.vacancy_id == Vacancy.id)
+            .options(selectinload(Vacancy.city))
             .where(Vacancy.is_active.is_(True))
         )
 
@@ -641,7 +739,7 @@ class VacancySearchRepository:
             )
 
         if location and location.strip():
-            stmt = stmt.where(func.coalesce(Vacancy.location, "").ilike(f"%{location.strip()}%"))
+            stmt = self._apply_location_filter(stmt, location.strip())
 
         if published_from is not None:
             stmt = stmt.where(Vacancy.first_seen_at >= published_from)
@@ -689,6 +787,7 @@ class VacancySearchRepository:
         stmt = (
             select(Vacancy)
             .outerjoin(VacancyTranslation, VacancyTranslation.vacancy_id == Vacancy.id)
+            .options(selectinload(Vacancy.city))
             .where(Vacancy.is_active.is_(True))
             .group_by(Vacancy.id)
             .order_by(Vacancy.first_seen_at.desc())
@@ -708,7 +807,7 @@ class VacancySearchRepository:
             # Regex operator differs per dialect; fallback keeps deterministic behavior.
             stmt = stmt.where(searchable_text.ilike(f"%{regex}%"))
         if location and location.strip():
-            stmt = stmt.where(func.coalesce(Vacancy.location, "").ilike(f"%{location.strip()}%"))
+            stmt = self._apply_location_filter(stmt, location.strip())
         if published_from is not None:
             stmt = stmt.where(Vacancy.first_seen_at >= published_from)
         if published_to is not None:
@@ -724,14 +823,15 @@ class VacancySearchRepository:
         return result.scalars().all()
 
     async def list_top_locations(self, *, limit: int = 8) -> list[str]:
+        # Group by the normalised city and surface its display label
+        # (translation preferred, English otherwise) so each place appears once.
+        display = func.coalesce(City.name_translated, City.name_en)
         stmt = (
-            select(Vacancy.location)
-            .where(
-                Vacancy.is_active.is_(True),
-                Vacancy.location.is_not(None),
-                func.length(func.trim(Vacancy.location)) > 0,
-            )
-            .group_by(Vacancy.location)
+            select(display)
+            .select_from(Vacancy)
+            .join(City, City.id == Vacancy.city_id)
+            .where(Vacancy.is_active.is_(True))
+            .group_by(display)
             .order_by(func.count(Vacancy.id).desc())
             .limit(limit)
         )
@@ -785,6 +885,86 @@ class ScrapeRunRepository:
         run.deactivated_count = deactivated_count
         run.error_message = error_message
         self._session.add(run)
+
+
+class StatsRepository:
+    """Aggregate counters for the daily admin health report."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def daily_report(self, since: datetime) -> dict[str, Any]:
+        """Collect added/translated/total counters and per-source run health.
+
+        ``since`` bounds the "new" window (typically now − 24h).
+        """
+        # New vacancies added in the window, per source
+        new_rows = await self._session.execute(
+            select(Vacancy.source, func.count(Vacancy.id))
+            .where(Vacancy.first_seen_at >= since)
+            .group_by(Vacancy.source)
+        )
+        new_by_source = {src: int(cnt) for src, cnt in new_rows.all()}
+
+        # Overall totals per source (all-time + active)
+        total_rows = await self._session.execute(
+            select(
+                Vacancy.source,
+                func.count(Vacancy.id),
+                func.count(Vacancy.id).filter(Vacancy.is_active.is_(True)),
+            ).group_by(Vacancy.source)
+        )
+        total_by_source: dict[str, tuple[int, int]] = {
+            src: (int(total), int(active)) for src, total, active in total_rows.all()
+        }
+
+        # Translations
+        translated_since = int(
+            (
+                await self._session.execute(
+                    select(func.count(VacancyTranslation.id)).where(
+                        VacancyTranslation.translated_at >= since
+                    )
+                )
+            ).scalar_one()
+        )
+        translated_total = int(
+            (
+                await self._session.execute(select(func.count(VacancyTranslation.id)))
+            ).scalar_one()
+        )
+
+        # Per-source scrape-run health within the window
+        run_rows = await self._session.execute(
+            select(
+                ScrapeRun.source,
+                func.count(ScrapeRun.id).filter(ScrapeRun.status == "success"),
+                func.count(ScrapeRun.id).filter(ScrapeRun.status == "failed"),
+                func.coalesce(func.sum(ScrapeRun.new_count), 0),
+            )
+            .where(ScrapeRun.started_at >= since)
+            .group_by(ScrapeRun.source)
+        )
+        runs_by_source = {
+            src: {"success": int(ok), "failed": int(failed), "new_count": int(new_count)}
+            for src, ok, failed, new_count in run_rows.all()
+        }
+
+        new_total = sum(new_by_source.values())
+        total_vacancies = sum(t for t, _ in total_by_source.values())
+        active_vacancies = sum(a for _, a in total_by_source.values())
+
+        return {
+            "since": since,
+            "new_by_source": new_by_source,
+            "new_total": new_total,
+            "total_by_source": total_by_source,
+            "total_vacancies": total_vacancies,
+            "active_vacancies": active_vacancies,
+            "translated_since": translated_since,
+            "translated_total": translated_total,
+            "runs_by_source": runs_by_source,
+        }
 
 
 # ------------------------------------------------------------------

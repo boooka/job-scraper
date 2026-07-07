@@ -1,5 +1,9 @@
 # Overrides for local development — hot-reload source, debug logging
 services:
+  migrate:
+    volumes:
+      - .:/app          # use live migrations so new revisions apply without rebuild
+
   scraper:
     command: ["python", "-m", "src.main", "scheduler"]
     volumes:
@@ -12,13 +16,31 @@ services:
       LOG_FORMAT: console
     restart: "unless-stopped"
 
+  bot:
+    volumes:
+      - .:/app          # mount source for live reload
+    environment:
+      DATABASE_URL: postgresql+asyncpg://scraper:scraper_pass@postgres:5432/job_scraper
+      LOG_FORMAT: console
+    restart: "unless-stopped"
+
+  admin:
+    command: ["sh", "-c", "python manage.py migrate --noinput && python manage.py runserver 0.0.0.0:8000"]
+    volumes:
+      - ./admin_panel:/app
+    environment:
+      DATABASE_URL: postgresql://scraper:scraper_pass@postgres:5432/job_scraper
+      DJANGO_DEBUG: "true"
+      DJANGO_ALLOWED_HOSTS: "*"
+    restart: "unless-stopped"
+
   debug:
     build: .
     profiles: ["debug"]
     command: ["python", "scripts/debug_selectors.py"]
     environment:
-      SOURCE: "cv"        
-      # SOURCE: "cvonline"
+      # SOURCE: "cv"        
+      SOURCE: "cvonline"
       # SOURCE: "newsite"
       # SELECTOR: "div.job-card h2"   # опционально      
     volumes:

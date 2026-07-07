@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from src.db.repository import (
+    CityRepository,
+    StatsRepository,
     TelegramDeliveryRepository,
     TelegramSubscriptionRepository,
     TelegramUserRepository,
@@ -123,7 +125,7 @@ async def test_unsubscribe_marks_inactive_and_keeps_row(db_session):
 @pytest.mark.asyncio
 async def test_telegram_user_upsert_tracks_last_seen(db_session):
     repo = TelegramUserRepository(db_session)
-    await repo.upsert_user(
+    _, created_first = await repo.upsert_user(
         telegram_user_id=123456789,
         username="test_user",
         first_name="Test",
@@ -133,7 +135,7 @@ async def test_telegram_user_upsert_tracks_last_seen(db_session):
         is_premium=True,
         last_chat_id=123,
     )
-    await repo.upsert_user(
+    _, created_second = await repo.upsert_user(
         telegram_user_id=123456789,
         username="test_user_updated",
         first_name="Test",
@@ -143,10 +145,65 @@ async def test_telegram_user_upsert_tracks_last_seen(db_session):
         is_premium=True,
         last_chat_id=321,
     )
+    # First sight reports created=True, subsequent upserts created=False
+    assert created_first is True
+    assert created_second is False
     users = (await db_session.execute(select(TelegramUser))).scalars().all()
     assert len(users) == 1
     assert users[0].username == "test_user_updated"
     assert users[0].last_chat_id == 321
+
+
+@pytest.mark.asyncio
+async def test_daily_report_counts_and_stale_flag(db_session):
+    v_repo = VacancyRepository(db_session)
+    # Two fresh vacancies from different sources
+    await v_repo.upsert_vacancy(_vacancy(source="cvbankas", external_id="d1",
+                                         url="https://example.com/d1"))
+    await v_repo.upsert_vacancy(_vacancy(source="cv", external_id="d2",
+                                         url="https://example.com/d2"))
+
+    stats_repo = StatsRepository(db_session)
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    report = await stats_repo.daily_report(since)
+
+    assert report["new_total"] == 2
+    assert report["new_by_source"].get("cvbankas") == 1
+    assert report["new_by_source"].get("cv") == 1
+    assert report["active_vacancies"] == 2
+
+    # Nothing added in the far future window → stale
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    stale = await stats_repo.daily_report(future)
+    assert stale["new_total"] == 0
+
+    from src.services.admin_notifier import format_daily_report
+
+    text = format_daily_report(stale, stale_hours=24)
+    assert "НЕ добавлено" in text
+
+
+@pytest.mark.asyncio
+async def test_city_get_or_create_is_idempotent_and_cached(db_session):
+    from src.models.orm import City
+
+    repo = CityRepository(db_session)
+    first = await repo.get_or_create("Vilnius", None)
+    # Second call within the same repo returns the cached instance, no dup row
+    second = await repo.get_or_create("Vilnius", "Вильнюс")
+    assert first is second
+    # Translation is backfilled onto the existing row
+    assert second.name_translated == "Вильнюс"
+
+    cities = (await db_session.execute(select(City).where(City.name_en == "Vilnius"))).scalars().all()
+    assert len(cities) == 1
+
+    # A fresh repo (new batch) must also find the existing row, not insert again
+    repo2 = CityRepository(db_session)
+    again = await repo2.get_or_create("Vilnius", None)
+    assert again.id == first.id
+    cities = (await db_session.execute(select(City).where(City.name_en == "Vilnius"))).scalars().all()
+    assert len(cities) == 1
 
 
 @pytest.mark.asyncio
@@ -258,6 +315,55 @@ async def test_location_and_salary_suggestions_from_db(db_session):
     s_repo = VacancySearchRepository(db_session)
     locations = await s_repo.list_top_locations(limit=5)
     salaries = await s_repo.list_salary_suggestions(limit=5)
-    assert "Vilnius" in locations
-    assert "Kaunas" in locations
+    # Locations are normalised to a city and shown with the RU translation
+    # ("Vilnius" → "Вильнюс") preferred over the English name.
+    assert "Вильнюс" in locations
+    assert "Каунас" in locations
     assert any(v in salaries for v in (1800, 2000))
+
+
+@pytest.mark.asyncio
+async def test_city_normalisation_unifies_spellings(db_session):
+    """"Vilnius" (LT) and "Вильнюс" (RU) resolve to one city; display uses RU."""
+    from sqlalchemy.orm import selectinload
+
+    from src.models.orm import City
+
+    v_repo = VacancyRepository(db_session)
+    await v_repo.upsert_vacancy(_vacancy(external_id="lt", location="Vilnius",
+                                         url="https://example.com/lt"))
+    await v_repo.upsert_vacancy(_vacancy(external_id="ru", location="Вильнюс",
+                                         url="https://example.com/ru"))
+
+    cities = (await db_session.execute(select(City))).scalars().all()
+    vilnius = [c for c in cities if c.name_en == "Vilnius"]
+    assert len(vilnius) == 1
+    assert vilnius[0].name_translated == "Вильнюс"
+
+    rows = (
+        await db_session.execute(
+            select(Vacancy)
+            .options(selectinload(Vacancy.city))
+            .where(Vacancy.external_id.in_(("lt", "ru")))
+        )
+    ).scalars().all()
+    assert len(rows) == 2
+    assert {r.city_id for r in rows} == {vilnius[0].id}
+    # Display prefers the translation regardless of the scraped spelling
+    assert all(r.display_location == "Вильнюс" for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_city_search_filter_cross_language(db_session):
+    """A location filter typed in either language matches the same vacancies."""
+    v_repo = VacancyRepository(db_session)
+    await v_repo.upsert_vacancy(_vacancy(external_id="c1", location="Kaunas",
+                                         title="Rust engineer", url="https://example.com/c1"))
+    s_repo = VacancySearchRepository(db_session)
+
+    for term in ("Kaunas", "Каунас"):
+        rows = await s_repo.search(
+            includes=[], excludes=[], fuzzy=[], regex=None,
+            language="RU", limit=10, is_admin=False, location=term,
+        )
+        assert any(r.external_id == "c1" for r in rows), term

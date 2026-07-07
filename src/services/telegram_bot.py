@@ -145,6 +145,15 @@ class TelegramBotService:
         return f"*{safe_title}*\n_{safe_company} \\| {safe_location}_\n{safe_url}"
 
     @staticmethod
+    def _row_location(row: Any) -> str:
+        """Display label for a vacancy's location — normalised city with its
+        translation when available, otherwise the raw scraped string."""
+        loc = getattr(row, "display_location", None)
+        if loc is None:
+            loc = getattr(row, "location", None)
+        return loc or "Unknown location"
+
+    @staticmethod
     def _extract_args(text: str) -> str:
         parts = text.split(maxsplit=1)
         return parts[1].strip() if len(parts) > 1 else ""
@@ -201,6 +210,33 @@ class TelegramBotService:
     async def send_message_public(self, chat_id: int, text: str) -> None:
         await self._send_text(chat_id, text, markdown=False)
 
+    async def close(self) -> None:
+        """Close the underlying aiohttp session.
+
+        For throwaway service instances created just to push a message from the
+        scheduler process (see subscription_notifier / admin_notifier); the
+        long-running polling instance manages its own session lifecycle.
+        """
+        await self.bot.session.close()
+
+    async def notify_admins(self, text: str) -> int:
+        """Send a plain-text message to every configured admin's last chat.
+
+        Best-effort: failures per admin are logged, never raised. Returns the
+        number of admins successfully notified.
+        """
+        async with get_session() as session:
+            repo = TelegramUserRepository(session)
+            chat_ids = await repo.list_last_chat_ids_for_usernames(self._admin_usernames)
+        sent = 0
+        for chat_id in chat_ids:
+            try:
+                await self._send_text(chat_id, text, markdown=False)
+                sent += 1
+            except Exception as exc:
+                self._tg_debug("admin_notify.failed", {"chat_id": chat_id, "error": str(exc)})
+        return sent
+
     async def _is_admin(self, message: Message) -> bool:
         user = message.from_user
         if user is None:
@@ -215,12 +251,18 @@ class TelegramBotService:
             self._tg_debug("telegram.get_chat_member_failed", {"error": str(exc)})
             return False
 
+    @staticmethod
+    def _user_display(user: User) -> str:
+        name = " ".join(p for p in (user.first_name, user.last_name) if p)
+        handle = f"@{user.username}" if user.username else f"id={user.id}"
+        return f"{name} ({handle})" if name else handle
+
     async def _remember_user(self, user: User | None, chat_id: int | None = None) -> None:
         if user is None:
             return
         async with get_session() as session:
             repo = TelegramUserRepository(session)
-            await repo.upsert_user(
+            _, created = await repo.upsert_user(
                 telegram_user_id=user.id,
                 username=user.username,
                 first_name=user.first_name,
@@ -229,6 +271,17 @@ class TelegramBotService:
                 is_bot=user.is_bot,
                 is_premium=user.is_premium,
                 last_chat_id=chat_id,
+            )
+        # Alert admins the first time a real (non-bot, non-admin) user appears
+        if (
+            created
+            and settings.admin_notify_new_users
+            and not user.is_bot
+            and (user.username or "").lower() not in self._admin_usernames
+        ):
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            await self.notify_admins(
+                f"👤 Новый пользователь бота\n{self._user_display(user)}\nВремя: {ts}"
             )
 
     @staticmethod
@@ -436,7 +489,7 @@ class TelegramBotService:
             card = self._format_vacancy_card_md(
                 title=getattr(row, "title", "") or "Untitled",
                 company=getattr(row, "company_name", "") or "Unknown company",
-                location=getattr(row, "location", "") or "Unknown location",
+                location=self._row_location(row),
                 url=getattr(row, "url", ""),
             )
             url = getattr(row, "url", "")
@@ -463,6 +516,17 @@ class TelegramBotService:
         rows.append([InlineKeyboardButton(text="Показать все", callback_data=f"s_all:{session_token}")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
+    async def _notify_new_subscription(self, user: User | None, sub_id: int, query_raw: str) -> None:
+        """Alert admins when a (non-admin) user creates a subscription."""
+        if not settings.admin_notify_new_subscriptions or user is None:
+            return
+        if (user.username or "").lower() in self._admin_usernames:
+            return
+        query_preview = query_raw if len(query_raw) <= 120 else query_raw[:120] + "…"
+        await self.notify_admins(
+            f"⭐ Новая подписка #{sub_id}\n{self._user_display(user)}\nЗапрос: {query_preview}"
+        )
+
     async def _execute_subscribe(self, message: Message, query_raw: str) -> None:
         if message.from_user is None:
             return
@@ -475,6 +539,7 @@ class TelegramBotService:
                 query=query_raw,
             )
         await self._send_text(message.chat.id, TelegramMessages.subscription_created(sub.id))
+        await self._notify_new_subscription(message.from_user, sub.id, query_raw)
 
     def _register_handlers(self) -> None:
         @self.router.message(Command("start"))
@@ -825,6 +890,7 @@ class TelegramBotService:
                 )
             self._pending_inline_queries.pop(token, None)
             await callback.answer(text=f"Подписка #{sub.id} создана")
+            await self._notify_new_subscription(callback.from_user, sub.id, query_raw)
 
         @self.router.message()
         async def _pending_text(message: Message) -> None:

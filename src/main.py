@@ -45,13 +45,27 @@ async def main() -> None:
         await create_tables()
         log.info("db.tables_created")
 
+    elif command == "backfill-cities":
+        from src.services.city_backfill import backfill_cities
+        summary = await backfill_cities()
+        log.info("backfill.summary", **summary)
+
+    elif command == "daily-report":
+        from src.services.admin_notifier import run_daily_admin_report
+        result = await run_daily_admin_report()
+        print(result.get("report", ""))
+        log.info("daily_report.manual_run", sent_to_admins=result.get("sent_to_admins", 0))
+
     elif command == "bot":
         from src.services.telegram_bot import run_telegram_bot
         await run_telegram_bot()
 
     else:
         print(f"Unknown command: {command}")
-        print("Usage: python -m src.main [scheduler|scrape [source]|migrate|bot]")
+        print(
+            "Usage: python -m src.main "
+            "[scheduler|scrape [source]|migrate|backfill-cities|daily-report|bot]"
+        )
         sys.exit(1)
 
 

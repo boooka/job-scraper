@@ -202,12 +202,20 @@ class BaseScraper(abc.ABC):
             return salary_min, salary_max, currency, salary_period
 
         values = [int(n) for n in nums if int(n) > 0]
+        low = raw.lower()
         if len(values) == 1:
-            salary_min = values[0]
+            # "До / Iki / up to N" is an upper bound; otherwise treat as lower.
+            if any(w in low for w in ("до", "iki", "upto")):
+                salary_max = values[0]
+            else:
+                salary_min = values[0]
         if len(values) >= 2:
             salary_min, salary_max = min(values[:2]), max(values[:2])
 
-        if "ч" in raw.lower() or "h" in raw.lower():
+        # Period detection across LT ("/val") and RU ("/час") interfaces.
+        # Default to month; only flip to hour on an explicit hourly marker.
+        hour_markers = ("/val", "val.", "/h", "/hr", "hour", "час", "/ч")
+        if any(marker in low for marker in hour_markers):
             salary_period = "hour"
         else:
             salary_period = "month"

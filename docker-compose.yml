@@ -67,6 +67,25 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  # ── Django admin panel ────────────────────────────────────────────────
+  admin:
+    build:
+      context: .
+      dockerfile: Dockerfile.django
+    container_name: job_scraper_admin
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://scraper:scraper_pass@postgres:5432/job_scraper
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-dev-insecure-key-change-me}
+      DJANGO_DEBUG: "false"
+      DJANGO_ALLOWED_HOSTS: "*"
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   # ── pgAdmin (optional, dev only) ─────────────────────────────────────
   pgadmin:
     image: dpage/pgadmin4:latest
