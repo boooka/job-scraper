@@ -109,6 +109,9 @@ class TelegramBotService:
         self._pending_user_action: dict[int, str] = {}
         self._search_context_by_user: dict[int, dict[str, Any]] = {}
         self._context_location_choices: dict[int, list[str]] = {}
+        # Last executed search query per user — fallback for the inline
+        # "Подписаться" button when its short-lived token has expired.
+        self._last_search_query: dict[int, str] = {}
 
         self._debug_logger = self._build_debug_logger()
         self.bot = Bot(
@@ -460,6 +463,7 @@ class TelegramBotService:
             return
         ctx = self._get_context(effective_user.id)
         query = str(ctx["query"] or "").strip()
+        self._last_search_query[effective_user.id] = query or "*"
         parsed = parse_search_query(query) if query else parse_search_query("")
         published_from: datetime | None = None
         if ctx["date_days"]:
@@ -508,6 +512,8 @@ class TelegramBotService:
 
     async def _execute_search(self, message: Message, query_raw: str) -> None:
         started = time.perf_counter()
+        if message.from_user is not None:
+            self._last_search_query[message.from_user.id] = query_raw
         is_admin = await self._is_admin(message)
         parsed = parse_search_query(query_raw)
         if parsed.regex and not is_admin:
@@ -1163,14 +1169,32 @@ class TelegramBotService:
             if not data.startswith("subq:"):
                 await callback.answer()
                 return
-            token = data[5:]
-            query_raw = self._pending_inline_queries.get(token, "")
-            if not query_raw or callback.from_user is None or callback.message is None:
+            if callback.from_user is None or callback.message is None:
                 await callback.answer()
                 return
-            sub_id, created = await self._create_subscription(
-                callback.from_user, callback.message.chat.id, query_raw
+            token = data[5:]
+            # The token maps to the search query in memory; if it expired (e.g.
+            # the bot restarted), fall back to the user's last search query so
+            # the button still works instead of silently doing nothing.
+            query_raw = self._pending_inline_queries.get(token) or self._last_search_query.get(
+                callback.from_user.id, ""
             )
+            if not query_raw:
+                await callback.answer(
+                    "Запрос устарел — повторите поиск и нажмите «Подписаться».",
+                    show_alert=True,
+                )
+                return
+            try:
+                sub_id, created = await self._create_subscription(
+                    callback.from_user, callback.message.chat.id, query_raw
+                )
+            except Exception as exc:
+                self._tg_debug("subscribe.failed", {"error": str(exc)})
+                await callback.answer(
+                    "Не удалось подписаться, попробуйте ещё раз.", show_alert=True
+                )
+                return
             self._pending_inline_queries.pop(token, None)
             # Toast (fast feedback) + a persistent chat message (so it is not missed)
             await callback.answer(
