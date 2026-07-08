@@ -63,7 +63,7 @@ async def run_subscription_notifications() -> dict[str, int]:
                             skipped += 1
                             metrics_registry.incr("notifications_skipped")
                             continue
-                        company = row.company_name or "Unknown company"
+                        company = row.display_company or "Unknown company"
                         location = row.display_location or "Unknown location"
                         text = (
                             f"Новая вакансия по подписке #{sub.id}\n"

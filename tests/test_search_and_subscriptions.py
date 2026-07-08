@@ -281,6 +281,47 @@ async def test_company_groups_unify_across_sources(db_session):
 
 
 @pytest.mark.asyncio
+async def test_company_filter_ignores_case_and_diacritics(db_session):
+    from sqlalchemy.orm import selectinload
+
+    from src.models.orm import Company
+
+    v_repo = VacancyRepository(db_session)
+    await v_repo.upsert_vacancy(
+        _vacancy(external_id="cf1", company="Telšiai Grupė, UAB", url="https://example.com/cf1")
+    )
+    await v_repo.upsert_vacancy(
+        _vacancy(external_id="cf2", company="Kita Įmonė, UAB", url="https://example.com/cf2")
+    )
+    s_repo = VacancySearchRepository(db_session)
+
+    # Case- and diacritic-insensitive: "telsiai" matches "Telšiai Grupė, UAB"
+    for term in ("telsiai", "TELŠIAI", "Grupė"):
+        rows = await s_repo.search(
+            includes=[],
+            excludes=[],
+            fuzzy=[],
+            regex=None,
+            language="RU",
+            limit=10,
+            is_admin=False,
+            company=term,
+        )
+        assert any(r.external_id == "cf1" for r in rows), term
+        assert all(r.external_id != "cf2" for r in rows), term
+
+    # display_company returns the canonical group name (eager-loaded)
+    row = (
+        await db_session.execute(
+            select(Vacancy)
+            .options(selectinload(Vacancy.company_ref).selectinload(Company.group))
+            .where(Vacancy.external_id == "cf1")
+        )
+    ).scalar_one()
+    assert row.display_company == "Telšiai Grupė, UAB"
+
+
+@pytest.mark.asyncio
 async def test_city_get_or_create_is_idempotent_and_cached(db_session):
     from src.models.orm import City
 

@@ -208,6 +208,19 @@ class Vacancy(Base):
             return self.city.display_name
         return self.location
 
+    @property
+    def display_company(self) -> str | None:
+        """Canonical company-group name, falling back to the scraped name.
+
+        Note: accessing ``self.company_ref`` and its ``group`` requires them to
+        be eager-loaded in an async session (use
+        ``selectinload(Vacancy.company_ref).selectinload(Company.group)``).
+        """
+        ref = self.company_ref
+        if ref is not None and ref.group is not None and ref.group.name:
+            return ref.group.name
+        return self.company_name
+
     def __repr__(self) -> str:
         return f"<Vacancy {self.source}:{self.external_id} '{self.title}'>"
 

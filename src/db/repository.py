@@ -721,6 +721,25 @@ class VacancySearchRepository:
         return stmt.outerjoin(City, City.id == Vacancy.city_id).where(or_(*conditions))
 
     @staticmethod
+    def _apply_company_filter(stmt: Any, term: str) -> Any:
+        """Match a company term ignoring case and diacritics.
+
+        The canonical ``company_groups.normalized_key`` is already deaccented +
+        casefolded, so normalising the user's input the same way and matching it
+        gives diacritic/case-insensitive search. Falls back to the raw
+        ``company_name`` (case-insensitive) for rows without a group.
+        """
+        key = normalize_company_name(term)
+        conditions = [func.coalesce(Vacancy.company_name, "").ilike(f"%{term}%")]
+        if key:
+            conditions.append(func.coalesce(CompanyGroup.normalized_key, "").like(f"%{key}%"))
+        return (
+            stmt.outerjoin(Company, Company.id == Vacancy.company_id)
+            .outerjoin(CompanyGroup, CompanyGroup.id == Company.group_id)
+            .where(or_(*conditions))
+        )
+
+    @staticmethod
     def _fuzzy_to_sql_like(term: str) -> str:
         escaped = re.escape(term).replace(r"\*", "%")
         return escaped.replace(r"\%", "%")
@@ -741,6 +760,7 @@ class VacancySearchRepository:
         limit: int,
         is_admin: bool,
         location: str | None = None,
+        company: str | None = None,
         published_from: datetime | None = None,
         published_to: datetime | None = None,
         salary_from: int | None = None,
@@ -759,6 +779,7 @@ class VacancySearchRepository:
                 limit=limit,
                 is_admin=is_admin,
                 location=location,
+                company=company,
                 published_from=published_from,
                 published_to=published_to,
                 salary_from=salary_from,
@@ -803,7 +824,10 @@ class VacancySearchRepository:
         stmt = (
             select(Vacancy, rank_expr.label("rank"))
             .outerjoin(translations_subq, translations_subq.c.vacancy_id == Vacancy.id)
-            .options(selectinload(Vacancy.city))
+            .options(
+                selectinload(Vacancy.city),
+                selectinload(Vacancy.company_ref).selectinload(Company.group),
+            )
             .where(Vacancy.is_active.is_(True))
         )
 
@@ -838,6 +862,9 @@ class VacancySearchRepository:
         if location and location.strip():
             stmt = self._apply_location_filter(stmt, location.strip())
 
+        if company and company.strip():
+            stmt = self._apply_company_filter(stmt, company.strip())
+
         if published_from is not None:
             stmt = stmt.where(Vacancy.first_seen_at >= published_from)
         if published_to is not None:
@@ -864,6 +891,7 @@ class VacancySearchRepository:
         limit: int,
         is_admin: bool,
         location: str | None = None,
+        company: str | None = None,
         published_from: datetime | None = None,
         published_to: datetime | None = None,
         salary_from: int | None = None,
@@ -882,7 +910,10 @@ class VacancySearchRepository:
         stmt = (
             select(Vacancy)
             .outerjoin(VacancyTranslation, VacancyTranslation.vacancy_id == Vacancy.id)
-            .options(selectinload(Vacancy.city))
+            .options(
+                selectinload(Vacancy.city),
+                selectinload(Vacancy.company_ref).selectinload(Company.group),
+            )
             .where(Vacancy.is_active.is_(True))
             .group_by(Vacancy.id)
             .order_by(Vacancy.first_seen_at.desc())
@@ -903,6 +934,8 @@ class VacancySearchRepository:
             stmt = stmt.where(searchable_text.ilike(f"%{regex}%"))
         if location and location.strip():
             stmt = self._apply_location_filter(stmt, location.strip())
+        if company and company.strip():
+            stmt = self._apply_company_filter(stmt, company.strip())
         if published_from is not None:
             stmt = stmt.where(Vacancy.first_seen_at >= published_from)
         if published_to is not None:
@@ -927,6 +960,22 @@ class VacancySearchRepository:
             .join(City, City.id == Vacancy.city_id)
             .where(Vacancy.is_active.is_(True))
             .group_by(display)
+            .order_by(func.count(Vacancy.id).desc())
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        return [row[0] for row in result.all() if row[0]]
+
+    async def list_top_companies(self, *, limit: int = 8) -> list[str]:
+        # Group by the canonical company group so each company appears once,
+        # ranked by number of active vacancies.
+        stmt = (
+            select(CompanyGroup.name)
+            .select_from(Vacancy)
+            .join(Company, Company.id == Vacancy.company_id)
+            .join(CompanyGroup, CompanyGroup.id == Company.group_id)
+            .where(Vacancy.is_active.is_(True))
+            .group_by(CompanyGroup.name)
             .order_by(func.count(Vacancy.id).desc())
             .limit(limit)
         )

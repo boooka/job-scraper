@@ -85,6 +85,7 @@ class TelegramMessages:
     FEEDBACK_SENT = "Спасибо! Ваше сообщение отправлено разработчику."
     ASK_CONTEXT_QUERY = "Введите поисковый запрос (или фразу)."
     ASK_CONTEXT_LOCATION_CUSTOM = "Введите местоположение текстом."
+    ASK_CONTEXT_COMPANY_CUSTOM = "Введите название компании текстом."
     ASK_CONTEXT_SALARY_FROM = "Введите зарплату ОТ (число)."
     ASK_CONTEXT_SALARY_TO = "Введите зарплату ДО (число)."
     ASK_CONTEXT_SALARY_RANGE = "Введите диапазон в формате: <от> <до>"
@@ -140,6 +141,7 @@ class TelegramMessages:
         *,
         query: str | None,
         location: str | None,
+        company: str | None,
         salary_from: int | None,
         salary_to: int | None,
         date_days: int | None,
@@ -149,6 +151,7 @@ class TelegramMessages:
             "Текущий контекст поиска:\n"
             f"- запрос: {query or '-'}\n"
             f"- локация: {location or '-'}\n"
+            f"- компания: {company or '-'}\n"
             f"- дата: {f'последние {date_days} дн.' if date_days else '-'}\n"
             f"- зарплата от: {salary_from if salary_from is not None else '-'}\n"
             f"- зарплата до: {salary_to if salary_to is not None else '-'}\n"
