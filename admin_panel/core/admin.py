@@ -68,10 +68,19 @@ class CityAdmin(admin.ModelAdmin):
 
 @admin.register(Company)
 class CompanyAdmin(admin.ModelAdmin):
-    list_display = ("name", "source", "country", "employee_count", "updated_at")
+    list_display = ("name", "source", "vacancy_count", "country", "employee_count", "updated_at")
     list_filter = ("source", "country")
     search_fields = ("name", "external_id", "office_address")
     readonly_fields = ("id", "created_at", "updated_at")
+
+    def get_queryset(self, request):
+        from django.db.models import Count
+
+        return super().get_queryset(request).annotate(_vacancy_count=Count("vacancies"))
+
+    @admin.display(description="Vacancies", ordering="_vacancy_count")
+    def vacancy_count(self, obj):
+        return getattr(obj, "_vacancy_count", 0)
 
 
 @admin.register(Vacancy)
