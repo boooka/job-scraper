@@ -1,11 +1,13 @@
 """Admin site registrations for the job-scraper data model."""
+
 from __future__ import annotations
 
-from django.contrib import admin
+from django.contrib import admin, messages
 
 from core.models import (
     City,
     Company,
+    CompanyGroup,
     ScrapeRun,
     TelegramSubscription,
     TelegramSubscriptionDelivery,
@@ -66,12 +68,75 @@ class CityAdmin(admin.ModelAdmin):
         return getattr(obj, "_vacancy_count", 0)
 
 
+@admin.register(CompanyGroup)
+class CompanyGroupAdmin(admin.ModelAdmin):
+    list_display = ("name", "company_count", "vacancy_count", "normalized_key", "updated_at")
+    search_fields = ("name", "normalized_key")
+    ordering = ("name",)
+    readonly_fields = ("normalized_key", "created_at", "updated_at")
+
+    def get_queryset(self, request):
+        from django.db.models import Count
+
+        return (
+            super()
+            .get_queryset(request)
+            .annotate(
+                _company_count=Count("companies", distinct=True),
+                _vacancy_count=Count("companies__vacancies", distinct=True),
+            )
+        )
+
+    @admin.display(description="Companies", ordering="_company_count")
+    def company_count(self, obj):
+        return getattr(obj, "_company_count", 0)
+
+    @admin.display(description="Vacancies", ordering="_vacancy_count")
+    def vacancy_count(self, obj):
+        return getattr(obj, "_vacancy_count", 0)
+
+
 @admin.register(Company)
 class CompanyAdmin(admin.ModelAdmin):
-    list_display = ("name", "source", "country", "employee_count", "updated_at")
+    list_display = (
+        "name",
+        "source",
+        "group",
+        "vacancy_count",
+        "country",
+        "employee_count",
+        "updated_at",
+    )
     list_filter = ("source", "country")
-    search_fields = ("name", "external_id", "office_address")
+    search_fields = ("name", "external_id", "office_address", "group__name")
     readonly_fields = ("id", "created_at", "updated_at")
+    raw_id_fields = ("group",)
+    list_select_related = ("group",)
+    actions = ("merge_into_one_group",)
+
+    def get_queryset(self, request):
+        from django.db.models import Count
+
+        return super().get_queryset(request).annotate(_vacancy_count=Count("vacancies"))
+
+    @admin.display(description="Vacancies", ordering="_vacancy_count")
+    def vacancy_count(self, obj):
+        return getattr(obj, "_vacancy_count", 0)
+
+    @admin.action(description="Объединить: перенести в группу первой выбранной компании")
+    def merge_into_one_group(self, request, queryset):
+        """Manual merge (option C): reassign all selected companies to the group
+        of the first selected company that already has one."""
+        target_group_id = (
+            queryset.exclude(group__isnull=True).values_list("group_id", flat=True).first()
+        )
+        if target_group_id is None:
+            self.message_user(
+                request, "Ни у одной выбранной компании нет группы.", level=messages.WARNING
+            )
+            return
+        updated = queryset.exclude(group_id=target_group_id).update(group_id=target_group_id)
+        self.message_user(request, f"Перенесено компаний в одну группу: {updated}.")
 
 
 @admin.register(Vacancy)

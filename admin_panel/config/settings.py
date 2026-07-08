@@ -6,6 +6,7 @@ handful of environment variables. Configuration is read directly from the
 environment (shared .env file) rather than importing src.config, to avoid
 pulling the asyncio/SQLAlchemy stack into this process.
 """
+
 from __future__ import annotations
 
 import os
@@ -20,7 +21,9 @@ load_dotenv(BASE_DIR.parent / ".env")
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-insecure-key-change-me")
 DEBUG = os.environ.get("DJANGO_DEBUG", "false").lower() in ("1", "true", "yes")
-ALLOWED_HOSTS = [h.strip() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",") if h.strip()]
+ALLOWED_HOSTS = [
+    h.strip() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",") if h.strip()
+]
 
 INSTALLED_APPS = [
     "django.contrib.admin",

@@ -45,6 +45,6 @@ RUN useradd -m -u 1000 scraper && chown -R scraper:scraper /app
 USER scraper
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
-    CMD python -c "import asyncio; from src.db.engine import get_engine; asyncio.run(get_engine().connect())" || exit 1
+    CMD python -c "import asyncio; from src.db.engine import check_connection; asyncio.run(check_connection())" || exit 1
 
 CMD ["python", "-m", "src.main", "scheduler"]

@@ -25,6 +25,38 @@ class Base(DeclarativeBase):
     pass
 
 
+class CompanyGroup(Base):
+    """Canonical company across sources.
+
+    Per-source ``Company`` rows (which carry source-specific data) link to one
+    ``CompanyGroup`` resolved by a normalized name key, so variants like
+    "UAB „Biuro“" / "Biuro, UAB" from different boards are unified. The grouping
+    is automatic but correctable in the admin (reassign a company's group).
+    """
+
+    __tablename__ = "company_groups"
+    __table_args__ = (
+        UniqueConstraint("normalized_key", name="uq_company_group_normalized_key"),
+        Index("ix_company_groups_name", "name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    normalized_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)  # canonical display name
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    companies: Mapped[list[Company]] = relationship("Company", back_populates="group")
+
+    def __repr__(self) -> str:
+        return f"<CompanyGroup {self.name!r}>"
+
+
 class Company(Base):
     """Company information extracted from vacancy listings."""
 
@@ -32,6 +64,7 @@ class Company(Base):
     __table_args__ = (
         UniqueConstraint("source", "external_id", name="uq_company_source_external_id"),
         Index("ix_companies_name", "name"),
+        Index("ix_companies_group_id", "group_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -44,6 +77,11 @@ class Company(Base):
     office_address: Mapped[str | None] = mapped_column(Text)
     contact_person: Mapped[str | None] = mapped_column(String(255))
 
+    # Canonical cross-source company FK
+    group_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("company_groups.id", ondelete="SET NULL"), nullable=True
+    )
+
     extra: Mapped[dict | None] = mapped_column(JSONB)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -53,6 +91,7 @@ class Company(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
+    group: Mapped[CompanyGroup | None] = relationship("CompanyGroup", back_populates="companies")
     vacancies: Mapped[list[Vacancy]] = relationship("Vacancy", back_populates="company_ref")
 
     def __repr__(self) -> str:
