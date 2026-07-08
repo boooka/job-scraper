@@ -108,6 +108,7 @@ poetry run python -m src.main scheduler         # run the scheduler
 | `bot`                                        | Run the Telegram bot (long-polling)                                            |
 | `migrate`                                    | Create tables from ORM metadata (dev; prefer Alembic in prod)                  |
 | `backfill-cities`                            | Resolve every vacancy's raw location into the `cities` dictionary (idempotent) |
+| `backfill-company-groups`                    | Group companies into canonical `company_groups` (idempotent)                   |
 | `daily-report`                               | Build and send the daily admin health report now                               |
 
 
@@ -156,7 +157,13 @@ tests/                          # pytest (async, sqlite in-memory)
 - **Vacancy** — scraped listing. Keeps the raw `location` string plus a FK to a
 normalized `city`; `display_location` prefers the city's translation.
 - **Company** — deduped per `(source, external_id)` (synthetic id from name when
-the site has none).
+the site has none). Linked to a canonical **CompanyGroup**.
+- **CompanyGroup** — canonical company across sources. Per-source `Company` rows
+resolve to one group by a normalized name key (strips legal forms/quotes/case/
+diacritics), so "UAB „Biuro“" / "Biuro, UAB" from different boards unify. See
+[company_normalizer.py](src/services/company_normalizer.py); grouping is
+automatic but correctable in the admin. `Vacancy.display_company` shows the
+canonical group name.
 - **City** — canonical `name_en` (always set) + optional `name_translated` (RU).
 See [city_normalizer.py](src/services/city_normalizer.py); different
 spellings resolve to one row (diacritic- and case-insensitive).
@@ -188,6 +195,20 @@ Backfill existing rows once:
 python -m src.main backfill-cities
 ```
 
+## Company Unification
+
+Per-source `Company` rows are grouped into a canonical **CompanyGroup** by a
+normalized name key (`company_normalizer.normalize_company_name`: casefold +
+deaccent, strips legal forms UAB/AB/MB/SIA/OÜ/filialas/ООО…). Resolved on upsert;
+`display_company` and the bot's company search/filter use the group, so the same
+company appears once across boards and search is case/diacritic-insensitive.
+
+Backfill existing rows once:
+
+```bash
+python -m src.main backfill-company-groups
+```
+
 
 
 ## Change Tracking
@@ -210,8 +231,15 @@ SELECT * FROM v_latest_scrape_runs;
 
 - Full-text search over original text **and** RU translation
 (`include`, `-exclude`, `~fuzzy`, and admin-only `regex`).
-- Context filters: location (normalized), date, salary range.
-- Subscriptions with de-duplicated delivery of new matches.
+- Context filters (🧩 Фильтры): query, location (normalized), **company**
+(top list or free text; case/diacritic-insensitive), date range
+(today / 3 / 7 / 14 / 30 days / any), salary range, auto-search.
+- Result cards show title, canonical company, location, **salary** (when
+present) and the listing's **last-updated date**, with "Открыть вакансию" and
+"Подписаться на этот запрос" buttons.
+- Subscriptions with de-duplicated delivery of new matches; "📋 Мои подписки"
+lists each with current-offers / unsubscribe buttons.
+- Full button reference is in `/help` (admin commands shown only to admins).
 - Admin: `/admin_stats` (delivery + metrics), `🛠 Админ` menu.
 
 

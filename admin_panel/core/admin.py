@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from django.contrib import admin, messages
+from django.db.models import Count, Q
 
 from core.models import (
     City,
@@ -59,11 +60,13 @@ class CityAdmin(admin.ModelAdmin):
     readonly_fields = ("created_at", "updated_at")
 
     def get_queryset(self, request):
-        from django.db.models import Count
+        return (
+            super()
+            .get_queryset(request)
+            .annotate(_vacancy_count=Count("vacancies", filter=Q(vacancies__is_active=True)))
+        )
 
-        return super().get_queryset(request).annotate(_vacancy_count=Count("vacancies"))
-
-    @admin.display(description="Vacancies", ordering="_vacancy_count")
+    @admin.display(description="Active vacancies", ordering="_vacancy_count")
     def vacancy_count(self, obj):
         return getattr(obj, "_vacancy_count", 0)
 
@@ -76,14 +79,16 @@ class CompanyGroupAdmin(admin.ModelAdmin):
     readonly_fields = ("normalized_key", "created_at", "updated_at")
 
     def get_queryset(self, request):
-        from django.db.models import Count
-
         return (
             super()
             .get_queryset(request)
             .annotate(
                 _company_count=Count("companies", distinct=True),
-                _vacancy_count=Count("companies__vacancies", distinct=True),
+                _vacancy_count=Count(
+                    "companies__vacancies",
+                    filter=Q(companies__vacancies__is_active=True),
+                    distinct=True,
+                ),
             )
         )
 
@@ -91,7 +96,7 @@ class CompanyGroupAdmin(admin.ModelAdmin):
     def company_count(self, obj):
         return getattr(obj, "_company_count", 0)
 
-    @admin.display(description="Vacancies", ordering="_vacancy_count")
+    @admin.display(description="Active vacancies", ordering="_vacancy_count")
     def vacancy_count(self, obj):
         return getattr(obj, "_vacancy_count", 0)
 
@@ -115,11 +120,13 @@ class CompanyAdmin(admin.ModelAdmin):
     actions = ("merge_into_one_group",)
 
     def get_queryset(self, request):
-        from django.db.models import Count
+        return (
+            super()
+            .get_queryset(request)
+            .annotate(_vacancy_count=Count("vacancies", filter=Q(vacancies__is_active=True)))
+        )
 
-        return super().get_queryset(request).annotate(_vacancy_count=Count("vacancies"))
-
-    @admin.display(description="Vacancies", ordering="_vacancy_count")
+    @admin.display(description="Active vacancies", ordering="_vacancy_count")
     def vacancy_count(self, obj):
         return getattr(obj, "_vacancy_count", 0)
 

@@ -182,6 +182,8 @@ class TelegramBotService:
         company: str,
         location: str,
         url: str,
+        salary: str | None = None,
+        updated: str | None = None,
     ) -> str:
         """Build a MarkdownV2-safe vacancy card string."""
         safe_title = cls._escape_md(title)
@@ -189,7 +191,16 @@ class TelegramBotService:
         safe_location = cls._escape_md(location)
         # URL can contain characters special for MarkdownV2 in plain text context.
         safe_url = cls._escape_md(url)
-        return f"*{safe_title}*\n_{safe_company} \\| {safe_location}_\n{safe_url}"
+        lines = [f"*{safe_title}*", f"_{safe_company} \\| {safe_location}_"]
+        meta: list[str] = []
+        if salary:
+            meta.append("💰 " + cls._escape_md(salary))
+        if updated:
+            meta.append("🕒 " + cls._escape_md(updated))
+        if meta:
+            lines.append(" · ".join(meta))
+        lines.append(safe_url)
+        return "\n".join(lines)
 
     @staticmethod
     def _row_location(row: Any) -> str:
@@ -208,6 +219,43 @@ class TelegramBotService:
         if name is None:
             name = getattr(row, "company_name", None)
         return name or "Unknown company"
+
+    @staticmethod
+    def _row_salary(row: Any) -> str | None:
+        """Human-readable salary, or None when the vacancy has no salary."""
+        smin = getattr(row, "salary_min", None)
+        smax = getattr(row, "salary_max", None)
+        if not smin and not smax:
+            return None
+        if smin and smax:
+            amount = f"{smin}–{smax}"
+        elif smin:
+            amount = f"от {smin}"
+        else:
+            amount = f"до {smax}"
+        currency = getattr(row, "salary_currency", None) or ""
+        symbol = {"EUR": "€", "USD": "$"}.get(currency, currency)
+        if symbol:
+            amount = f"{amount} {symbol}"
+        period = {"month": "/мес", "hour": "/час"}.get(
+            getattr(row, "salary_period", None) or "", ""
+        )
+        amount += period
+        stype = getattr(row, "salary_type", None)
+        if stype == "net":
+            amount += " на руки"
+        elif stype == "gross":
+            amount += " до налог."
+        return amount
+
+    @staticmethod
+    def _row_updated(row: Any) -> str | None:
+        """Last time the listing was seen in a scrape, as a short date."""
+        dt = getattr(row, "last_seen_at", None)
+        try:
+            return dt.strftime("%d.%m.%Y") if dt is not None else None
+        except Exception:
+            return None
 
     @staticmethod
     def _extract_args(text: str) -> str:
@@ -619,6 +667,8 @@ class TelegramBotService:
                 company=self._row_company(row),
                 location=self._row_location(row),
                 url=getattr(row, "url", ""),
+                salary=self._row_salary(row),
+                updated=self._row_updated(row),
             )
             url = getattr(row, "url", "")
             keyboard = InlineKeyboardMarkup(
