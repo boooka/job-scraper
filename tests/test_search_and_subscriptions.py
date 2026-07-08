@@ -247,6 +247,39 @@ async def test_rootlike_url_does_not_overwrite_existing_good_row(db_session):
     assert row.url == "https://cvonline.lt/vacancy/777/company/good"
 
 
+def test_company_name_normalization_unifies_variants():
+    from src.services.company_normalizer import normalize_company_name
+
+    variants = [
+        "AJK PRODUCTION, UAB",
+        "UAB „AJK Production“",
+        'SIA "AJK Production"',
+        "AJK Production",
+    ]
+    keys = {normalize_company_name(v) for v in variants}
+    assert keys == {"ajk production"}
+    assert normalize_company_name("UAB") == ""  # only a legal form → empty key
+
+
+@pytest.mark.asyncio
+async def test_company_groups_unify_across_sources(db_session):
+    from src.db.repository import CompanyRepository
+    from src.models.orm import Company
+
+    repo = CompanyRepository(db_session)
+    c1 = await repo.get_or_create(source="cvbankas", name="AJK PRODUCTION, UAB")
+    c2 = await repo.get_or_create(source="cvmarket", name="UAB „AJK Production“")
+    c3 = await repo.get_or_create(source="cv", name="Visai kita, UAB")
+
+    # Same canonical company across sources → one group
+    assert c1.group_id is not None
+    assert c1.group_id == c2.group_id
+    assert c3.group_id != c1.group_id
+
+    companies = (await db_session.execute(select(Company))).scalars().all()
+    assert {c.group_id for c in companies if c.name.startswith("AJK")} == {c1.group_id}
+
+
 @pytest.mark.asyncio
 async def test_city_get_or_create_is_idempotent_and_cached(db_session):
     from src.models.orm import City

@@ -18,6 +18,7 @@ from src.logger import get_logger
 from src.models.orm import (
     City,
     Company,
+    CompanyGroup,
     ScrapeRun,
     TelegramSubscription,
     TelegramSubscriptionDelivery,
@@ -29,6 +30,7 @@ from src.models.orm import (
 )
 from src.models.schemas import VacancyData
 from src.services.city_normalizer import normalize_city
+from src.services.company_normalizer import normalize_company_name
 
 log = get_logger(__name__)
 
@@ -47,11 +49,55 @@ TRACKED_FIELDS: tuple[str, ...] = (
 )
 
 
+class CompanyGroupRepository:
+    """Resolve company names to a canonical cross-source CompanyGroup."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._cache: dict[str, CompanyGroup] = {}
+
+    async def _select(self, normalized_key: str) -> CompanyGroup | None:
+        result = await self._session.execute(
+            select(CompanyGroup).where(CompanyGroup.normalized_key == normalized_key)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_or_create(self, name: str) -> CompanyGroup | None:
+        """Return the group for this company name, creating it if absent.
+
+        Returns None when the name yields an empty key (e.g. only a legal form).
+        Uses a per-batch cache + SAVEPOINT to survive a concurrent unique-insert
+        race (same pattern as CityRepository).
+        """
+        key = normalize_company_name(name)
+        if not key:
+            return None
+
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+
+        group = await self._select(key)
+        if group is None:
+            group = CompanyGroup(normalized_key=key, name=name.strip())
+            try:
+                async with self._session.begin_nested():
+                    self._session.add(group)
+                    await self._session.flush()
+            except IntegrityError:
+                group = await self._select(key)
+                if group is None:  # pragma: no cover
+                    raise
+        self._cache[key] = group
+        return group
+
+
 class CompanyRepository:
     """Upsert and lookup companies."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+        self._group_repo = CompanyGroupRepository(session)
 
     async def get_or_create(
         self,
@@ -75,15 +121,23 @@ class CompanyRepository:
         result = await self._session.execute(stmt)
         company = result.scalar_one_or_none()
 
+        group = await self._group_repo.get_or_create(name)
+        group_id = group.id if group else None
+
         if company is None:
             company = Company(
                 source=source,
                 external_id=ext_id,
                 name=name,
+                group_id=group_id,
             )
             self._session.add(company)
             await self._session.flush()
             log.debug("company.created", source=source, name=name)
+        elif group_id is not None and company.group_id != group_id:
+            # Backfill / correct the canonical group link
+            company.group_id = group_id
+            self._session.add(company)
 
         return company
 

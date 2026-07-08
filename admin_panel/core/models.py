@@ -5,9 +5,28 @@ Alembic migrations in migrations/versions/. These models never generate or
 apply migrations of their own (managed = False) — they only give the Django
 admin a way to read and write the existing data.
 """
+
 from __future__ import annotations
 
 from django.db import models
+
+
+class CompanyGroup(models.Model):
+    id = models.AutoField(primary_key=True)
+    normalized_key = models.CharField(max_length=255, unique=True)
+    name = models.CharField(max_length=255)
+
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        managed = False
+        db_table = "company_groups"
+        verbose_name = "Company group"
+        verbose_name_plural = "Company groups"
+
+    def __str__(self) -> str:
+        return self.name
 
 
 class Company(models.Model):
@@ -20,6 +39,16 @@ class Company(models.Model):
     country = models.CharField(max_length=100, null=True, blank=True)
     office_address = models.TextField(null=True, blank=True)
     contact_person = models.CharField(max_length=255, null=True, blank=True)
+
+    group = models.ForeignKey(
+        CompanyGroup,
+        related_name="companies",
+        db_column="group_id",
+        on_delete=models.DO_NOTHING,
+        db_constraint=False,
+        null=True,
+        blank=True,
+    )
 
     extra = models.JSONField(null=True, blank=True)
 

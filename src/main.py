@@ -54,6 +54,12 @@ async def main() -> None:
         summary = await backfill_cities()
         log.info("backfill.summary", **summary)
 
+    elif command == "backfill-company-groups":
+        from src.services.company_backfill import backfill_company_groups
+
+        summary = await backfill_company_groups()
+        log.info("backfill.summary", **summary)
+
     elif command == "daily-report":
         from src.services.admin_notifier import run_daily_admin_report
 
@@ -70,7 +76,8 @@ async def main() -> None:
         print(f"Unknown command: {command}")
         print(
             "Usage: python -m src.main "
-            "[scheduler|scrape [source]|migrate|backfill-cities|daily-report|bot]"
+            "[scheduler|scrape [source]|migrate|backfill-cities|"
+            "backfill-company-groups|daily-report|bot]"
         )
         sys.exit(1)
 
