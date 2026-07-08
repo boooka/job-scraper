@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -54,6 +55,15 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
         except Exception:
             await session.rollback()
             raise
+
+
+async def check_connection() -> None:
+    """Open a connection and run a trivial query — used by the Docker
+    HEALTHCHECK. ``AsyncEngine.connect()`` returns a connection object (not a
+    coroutine), so it must be awaited via ``async with``; passing it straight to
+    ``asyncio.run`` fails with "a coroutine was expected"."""
+    async with get_engine().connect() as conn:
+        await conn.execute(text("SELECT 1"))
 
 
 async def create_tables() -> None:
