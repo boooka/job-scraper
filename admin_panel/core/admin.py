@@ -153,6 +153,60 @@ class CompanyAdmin(admin.ModelAdmin):
         self.message_user(request, f"Перенесено компаний в одну группу: {updated}.")
 
 
+class RelatedAutocompleteFilter(admin.SimpleListFilter):
+    """Changelist filter rendered as a Select2 autocomplete input.
+
+    Instead of a static dropdown it shows a text box that queries the built-in
+    admin autocomplete endpoint (``admin:autocomplete``) after 2 typed chars,
+    suggesting live values from the DB via the related model's search_fields.
+    Subclasses set ``title`` / ``parameter_name`` / ``field_name`` and the
+    ``related_model`` used to render the label of the currently selected value.
+    """
+
+    template = "core/autocomplete_filter.html"
+    field_name = ""  # FK on Vacancy, e.g. "city" / "company"
+    related_model = None
+
+    def lookups(self, request, model_admin):
+        return ()
+
+    def has_output(self):
+        # No static choices, but we always want the input rendered.
+        return True
+
+    def queryset(self, request, queryset):
+        if self.value():
+            return queryset.filter(**{f"{self.field_name}__pk": self.value()})
+        return queryset
+
+    @property
+    def selected_value(self):
+        return self.value() or ""
+
+    @property
+    def selected_label(self):
+        """Human label for the active value, so Select2 shows it after reload."""
+        value = self.value()
+        if not value or self.related_model is None:
+            return ""
+        obj = self.related_model.objects.filter(pk=value).first()
+        return str(obj) if obj else value
+
+
+class CityAutocompleteFilter(RelatedAutocompleteFilter):
+    title = "city"
+    parameter_name = "city"
+    field_name = "city"
+    related_model = City
+
+
+class CompanyAutocompleteFilter(RelatedAutocompleteFilter):
+    title = "company"
+    parameter_name = "company"
+    field_name = "company"
+    related_model = Company
+
+
 @admin.register(Vacancy)
 class VacancyAdmin(admin.ModelAdmin):
     list_display = (
@@ -168,9 +222,18 @@ class VacancyAdmin(admin.ModelAdmin):
         "welcome_ukraine",
         "last_seen_at",
     )
-    list_filter = ("source", "is_active", "welcome_ukraine", "salary_currency")
+    list_filter = (
+        CityAutocompleteFilter,
+        CompanyAutocompleteFilter,
+        "source",
+        "is_active",
+        "welcome_ukraine",
+        "salary_currency",
+    )
     search_fields = ("title", "company_name", "external_id", "location")
-    raw_id_fields = ("company", "city")
+    # autocomplete_fields (not raw_id) both gives Select2 on the change form and
+    # authorizes the admin:autocomplete endpoint to serve city/company here.
+    autocomplete_fields = ("company", "city")
     list_select_related = ("company", "city")
     readonly_fields = ("id", "first_seen_at", "last_seen_at")
     inlines = (VacancyTranslationInline, VacancyChangeInline)

@@ -1,0 +1,17 @@
+{% load i18n %}
+<h3>{% blocktranslate with name=title %}By {{ name }}{% endblocktranslate %}</h3>
+<div class="autocomplete-filter" style="padding: 2px 8px 8px;">
+  <select class="admin-autocomplete-filter"
+          name="{{ spec.parameter_name }}"
+          data-app-label="core"
+          data-model-name="vacancy"
+          data-field-name="{{ spec.field_name }}"
+          data-ajax--url="{% url 'admin:autocomplete' %}"
+          data-placeholder="{{ title }}"
+          style="width: 95%;">
+    <option value=""></option>
+    {% if spec.selected_value %}
+      <option value="{{ spec.selected_value }}" selected>{{ spec.selected_label }}</option>
+    {% endif %}
+  </select>
+</div>
