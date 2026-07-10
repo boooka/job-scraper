@@ -5,6 +5,13 @@
 {$ADMIN_DOMAIN} {
 	encode zstd gzip
 
+	# HTTP Basic Auth перед всем сайтом — второй фактор поверх Django-логина.
+	# Пользователь и bcrypt-хеш берутся из окружения (см. .env). Хеш генерится:
+	#   docker run --rm caddy:2-alpine caddy hash-password --plaintext 'пароль'
+	basic_auth {
+		{$ADMIN_BASIC_USER} {$ADMIN_BASIC_HASH}
+	}
+
 	# Статику админки (collectstatic → /app/staticfiles, общий volume) отдаёт
 	# сам Caddy — при DEBUG=false Django/gunicorn её не обслуживают.
 	handle_path /static/* {

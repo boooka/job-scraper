@@ -147,6 +147,9 @@ services:
     container_name: job_scraper_caddy
     restart: unless-stopped
     logging: *logging
+    # env_file passes values literally (no interpolation) — needed because the
+    # bcrypt hash in ADMIN_BASIC_HASH contains '$' that compose would mangle.
+    env_file: .env
     environment:
       ADMIN_DOMAIN: ${ADMIN_DOMAIN:?set ADMIN_DOMAIN in .env}
     ports:
