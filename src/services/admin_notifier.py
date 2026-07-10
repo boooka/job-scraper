@@ -35,23 +35,24 @@ def format_daily_report(stats: dict[str, Any], *, stale_hours: int) -> str:
         lines.append(f"📊 Ежедневный отчёт (за {stale_hours}ч)")
     lines.append("")
 
-    # Per-source added, with a warning marker for silent/failed scrapers
+    # Per-source added, with run counts and a warning marker for silent/failed scrapers
     lines.append("Добавлено вакансий:")
     known = set(_SOURCES)
     ordered = list(_SOURCES) + [s for s in sorted(new_by_source) if s not in known]
     for src in ordered:
         added = new_by_source.get(src, 0)
         run = runs_by_source.get(src, {})
+        ok = run.get("success", 0)
         failed = run.get("failed", 0)
-        no_success = run.get("success", 0) == 0
+        total_runs = ok + failed
         marker = ""
         if added == 0:
             marker = "  ⚠️ нет новых"
         if failed:
-            marker += f"  ❗ прогонов с ошибкой: {failed}"
-        elif no_success and src in known:
-            marker += "  ❗ не было успешных прогонов"
-        lines.append(f"  • {src}: +{added}{marker}")
+            marker += f"  ❗ с ошибкой: {failed}"
+        elif total_runs == 0 and src in known:
+            marker += "  ❗ не было прогонов"
+        lines.append(f"  • {src}: +{added} (прогонов: {total_runs}){marker}")
     lines.append(f"  Всего добавлено: +{new_total}")
     lines.append("")
 
@@ -75,8 +76,12 @@ def format_daily_report(stats: dict[str, Any], *, stale_hours: int) -> str:
     return "\n".join(lines)
 
 
-async def run_daily_admin_report() -> dict[str, Any]:
-    """Build the daily report and push it to admins. Safe to run manually."""
+async def build_daily_report() -> tuple[str, dict[str, Any]]:
+    """Aggregate stats and render the daily report text — without sending it.
+
+    Shared by the scheduled job and the "Админ: статистика" button so both
+    produce an identical report.
+    """
     stale_hours = settings.daily_report_stale_hours
     since = datetime.now(UTC) - timedelta(hours=stale_hours)
 
@@ -90,6 +95,12 @@ async def run_daily_admin_report() -> dict[str, Any]:
         translated_since=stats["translated_since"],
         active=stats["active_vacancies"],
     )
+    return report, stats
+
+
+async def run_daily_admin_report() -> dict[str, Any]:
+    """Build the daily report and push it to admins. Safe to run manually."""
+    report, stats = await build_daily_report()
 
     if not settings.telegram_bot_token:
         log.warning("daily_report.skipped_send", reason="TELEGRAM_BOT_TOKEN not configured")

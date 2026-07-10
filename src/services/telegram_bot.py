@@ -37,6 +37,7 @@ from src.db.repository import (
     VacancySearchRepository,
 )
 from src.logger import get_logger
+from src.services.admin_notifier import build_daily_report
 from src.services.metrics import metrics_registry
 from src.services.search_query import parse_search_query
 from src.services.subscription_notifier import get_last_notification_stats
@@ -920,6 +921,9 @@ class TelegramBotService:
             if not await self._is_admin(message):
                 await self._send_text(message.chat.id, TelegramMessages.ADMIN_ONLY)
                 return
+            # Same daily health report the scheduler pushes — on demand.
+            report, _ = await build_daily_report()
+            await self._send_text(message.chat.id, report, markdown=False)
             notify = get_last_notification_stats()
             metrics = metrics_registry.snapshot()
             lines = [

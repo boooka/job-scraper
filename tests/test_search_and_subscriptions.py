@@ -200,6 +200,7 @@ async def test_daily_report_counts_and_stale_flag(db_session):
 
     text = format_daily_report(stale, stale_hours=24)
     assert "НЕ добавлено" in text
+    assert "прогонов:" in text
 
 
 @pytest.mark.asyncio
