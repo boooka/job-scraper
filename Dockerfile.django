@@ -15,7 +15,12 @@ RUN pip install \
 
 COPY admin_panel/ ./
 
-RUN useradd -m -u 1000 django && chown -R django:django /app
+# Создаём каталог статики заранее и отдаём его uid 1000 ДО объявления тома,
+# чтобы named volume static_files унаследовал владельца django, а не root —
+# иначе collectstatic под non-root падает с PermissionError и gunicorn не стартует.
+RUN mkdir -p /app/staticfiles \
+    && useradd -m -u 1000 django \
+    && chown -R django:django /app
 USER django
 
 EXPOSE 8000
