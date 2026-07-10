@@ -19,6 +19,7 @@ from src.models.orm import (
     City,
     Company,
     CompanyGroup,
+    Schedule,
     ScrapeRun,
     TelegramSubscription,
     TelegramSubscriptionDelivery,
@@ -1029,6 +1030,47 @@ class ScrapeRunRepository:
         run.deactivated_count = deactivated_count
         run.error_message = error_message
         self._session.add(run)
+
+
+class ScheduleRepository:
+    """Read and seed admin-managed cron schedules (see orm.Schedule)."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_all(self) -> Sequence[Schedule]:
+        result = await self._session.execute(select(Schedule).order_by(Schedule.id))
+        return result.scalars().all()
+
+    async def seed_missing(self, defaults: Iterable[dict[str, Any]]) -> int:
+        """Insert a row for every job_id not yet present. Returns count inserted.
+
+        Called by the scheduler on startup so the table is populated from the
+        real .env cron values without clobbering admin edits made later.
+        """
+        existing = await self._session.execute(select(Schedule.job_id))
+        known = set(existing.scalars().all())
+        inserted = 0
+        for d in defaults:
+            if d["job_id"] in known:
+                continue
+            self._session.add(
+                Schedule(
+                    job_id=d["job_id"],
+                    name=d["name"],
+                    cron=d["cron"],
+                    enabled=d.get("enabled", True),
+                )
+            )
+            inserted += 1
+        await self._session.flush()
+        return inserted
+
+    async def clear_run_now(self, job_id: str) -> None:
+        """Reset the run-now flag after the scheduler has handled it."""
+        await self._session.execute(
+            update(Schedule).where(Schedule.job_id == job_id).values(run_now_requested_at=None)
+        )
 
 
 class StatsRepository:

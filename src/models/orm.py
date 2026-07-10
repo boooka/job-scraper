@@ -413,3 +413,36 @@ class TelegramSubscriptionDelivery(Base):
     sent_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class Schedule(Base):
+    """Admin-editable cron schedule for a scheduler job.
+
+    One row per job in the scheduler's JOB_REGISTRY (four scrapers, translation
+    catch-up, subscription notifications, daily report). Seeded from settings on
+    first scheduler start, then the DB is the source of truth: the scheduler
+    reloads this table once a minute and reschedules changed / enabled / disabled
+    jobs live. ``run_now_requested_at`` is set by the admin "Run now" action.
+    """
+
+    __tablename__ = "schedules"
+    __table_args__ = (UniqueConstraint("job_id", name="uq_schedules_job_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    cron: Mapped[str] = mapped_column(String(100), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=func.true())
+    run_now_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<Schedule {self.job_id!r} cron={self.cron!r} enabled={self.enabled}>"

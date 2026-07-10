@@ -275,6 +275,30 @@ class TelegramUser(models.Model):
         return f"{self.telegram_user_id} @{self.username or '-'}"
 
 
+class Schedule(models.Model):
+    id = models.AutoField(primary_key=True)
+    job_id = models.CharField(max_length=50, unique=True)
+    name = models.CharField(max_length=255)
+    cron = models.CharField(
+        max_length=100,
+        help_text="Cron из 5 полей: минута час день месяц день_недели (напр. 0 */4 * * *)",
+    )
+    enabled = models.BooleanField(default=True)
+    run_now_requested_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        managed = False
+        db_table = "schedules"
+        verbose_name = "Schedule"
+        verbose_name_plural = "Schedules"
+
+    def __str__(self) -> str:
+        return f"{self.job_id} ({self.cron})"
+
+
 class TelegramSubscriptionDelivery(models.Model):
     id = models.BigAutoField(primary_key=True)
     subscription = models.ForeignKey(

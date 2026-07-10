@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import re
+
+from django import forms
 from django.contrib import admin, messages
 from django.db.models import Count, Q
+from django.utils import timezone
 
 from core.models import (
     City,
     Company,
     CompanyGroup,
+    Schedule,
     ScrapeRun,
     TelegramSubscription,
     TelegramSubscriptionDelivery,
@@ -18,6 +23,8 @@ from core.models import (
     VacancyChange,
     VacancyTranslation,
 )
+
+_CRON_FIELD = re.compile(r"[A-Za-z0-9*/,\-]+")
 
 
 class ReadOnlyAdminMixin:
@@ -238,3 +245,52 @@ class TelegramSubscriptionDeliveryAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
     list_display = ("subscription", "vacancy", "sent_at")
     search_fields = ("subscription__telegram_user_id", "vacancy__title")
     ordering = ("-sent_at",)
+
+
+class ScheduleForm(forms.ModelForm):
+    class Meta:
+        model = Schedule
+        fields = ("cron", "enabled")
+
+    def clean_cron(self) -> str:
+        expr = (self.cleaned_data.get("cron") or "").strip()
+        parts = expr.split()
+        if len(parts) != 5:
+            raise forms.ValidationError(
+                "Cron должен содержать ровно 5 полей: минута час день месяц день_недели."
+            )
+        if not all(_CRON_FIELD.fullmatch(p) for p in parts):
+            raise forms.ValidationError(
+                "Недопустимые символы. Разрешены цифры и символы * / , - "
+                "(и имена дней/месяцев, напр. mon-fri)."
+            )
+        return expr
+
+
+@admin.register(Schedule)
+class ScheduleAdmin(admin.ModelAdmin):
+    form = ScheduleForm
+    list_display = ("job_id", "name", "cron", "enabled", "run_now_requested_at", "updated_at")
+    list_display_links = ("job_id",)
+    list_editable = ("cron", "enabled")
+    ordering = ("job_id",)
+    readonly_fields = ("job_id", "name", "run_now_requested_at", "created_at", "updated_at")
+    actions = ("run_now",)
+
+    # Rows are owned by the scheduler's JOB_REGISTRY — seeded on startup. Adding
+    # or deleting rows by hand would desync from the code, so both are disabled.
+    def has_add_permission(self, request) -> bool:
+        return False
+
+    def has_delete_permission(self, request, obj=None) -> bool:
+        return False
+
+    @admin.action(description="▶ Запустить сейчас")
+    def run_now(self, request, queryset) -> None:
+        updated = queryset.update(run_now_requested_at=timezone.now())
+        self.message_user(
+            request,
+            f"Запрошен внеплановый запуск задач: {updated}. "
+            "Scheduler подхватит в течение минуты.",
+            messages.SUCCESS,
+        )
