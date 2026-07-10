@@ -112,7 +112,7 @@ services:
         limits:
           memory: 384M
 
-  # ── Django admin panel (доступ только по SSH-туннелю) ─────────────────
+  # ── Django admin panel (за Caddy — порт наружу не выставлен) ───────────
   admin:
     build:
       context: .
@@ -125,12 +125,13 @@ services:
       <<: *database_url
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
       DJANGO_DEBUG: "false"
-      # За localhost-биндом можно оставить *, наружу порт не выставлен.
-      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-*}
-    # Слушает только петлю — открыть в браузере через:
-    #   ssh -L 8000:localhost:8000 <user>@<host>  → http://localhost:8000
-    ports:
-      - "127.0.0.1:8000:8000"
+      DJANGO_ALLOWED_HOSTS: "${ADMIN_DOMAIN:?set ADMIN_DOMAIN in .env},localhost,127.0.0.1"
+      DJANGO_CSRF_TRUSTED_ORIGINS: "https://${ADMIN_DOMAIN}"
+      DJANGO_SECURE_COOKIES: "true"
+    # Порт наружу НЕ пробрасывается — доступ только через Caddy (admin:8000
+    # внутри сети compose). collectstatic пишет в общий volume static_files.
+    volumes:
+      - static_files:/app/staticfiles
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -139,5 +140,31 @@ services:
         limits:
           memory: 384M
 
+  # ── Caddy: TLS-терминация + reverse-proxy на админку ──────────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: job_scraper_caddy
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      ADMIN_DOMAIN: ${ADMIN_DOMAIN:?set ADMIN_DOMAIN in .env}
+    ports:
+      - "80:80"     # нужен для ACME HTTP-01 challenge и редиректа на https
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - static_files:/srv/static:ro   # раздаёт /static/* админки
+      - caddy_data:/data              # сертификаты Let's Encrypt (персистентно!)
+      - caddy_config:/config
+    depends_on:
+      - admin
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
 volumes:
   postgres_data:
+  static_files:
+  caddy_data:
+  caddy_config:

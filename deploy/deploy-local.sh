@@ -17,6 +17,7 @@ COMPOSE="docker compose"
 BOT_SERVICE="bot"
 SCRAPER_SERVICE="scraper"
 ADMIN_SERVICE="admin"
+CADDY_SERVICE="caddy"
 POSTGRES_SERVICE="postgres"
 BACKUP_DIR="./backups"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
@@ -35,8 +36,33 @@ ensure_backup_dir() {
   mkdir -p "$BACKUP_DIR"
 }
 
+# Каталоги логов монтируются в контейнеры bind-mount'ом. Если их не создать
+# заранее, Docker создаёт точку монтирования от root, и non-root пользователь
+# внутри контейнера (uid 1000) не может писать → PermissionError на logs/app.
+CONTAINER_UID="${CONTAINER_UID:-1000}"
+ensure_runtime_dirs() {
+  mkdir -p logs/app logs/scraper logs/telegram logs/metrics
+  # Привести владельца к uid контейнерного пользователя, если есть права.
+  if [ "$(id -u)" != "$CONTAINER_UID" ]; then
+    chown -R "$CONTAINER_UID:$CONTAINER_UID" logs 2>/dev/null \
+      || sudo chown -R "$CONTAINER_UID:$CONTAINER_UID" logs 2>/dev/null \
+      || warn "Не удалось chown logs на uid $CONTAINER_UID — сделайте вручную при PermissionError."
+  fi
+}
+
 compose_postgres_running() {
   $COMPOSE ps -q "$POSTGRES_SERVICE" >/dev/null 2>&1 && [ -n "$($COMPOSE ps -q "$POSTGRES_SERVICE" 2>/dev/null)" ]
+}
+
+# Список сервисов приложения. caddy есть только в prod-конфиге
+# (docker-compose.prod.yml) — добавляем его, лишь если он определён в активном
+# compose-файле, чтобы dev-запуск не падал на "no such service: caddy".
+app_services() {
+  local svcs="$SCRAPER_SERVICE $BOT_SERVICE $ADMIN_SERVICE"
+  if $COMPOSE config --services 2>/dev/null | grep -qx "$CADDY_SERVICE"; then
+    svcs="$svcs $CADDY_SERVICE"
+  fi
+  echo "$svcs"
 }
 
 load_db_env() {
@@ -167,9 +193,10 @@ case "$cmd" in
     $COMPOSE up -d "$POSTGRES_SERVICE"
     backup_before_migrate
     apply_migrations
+    ensure_runtime_dirs
     info "Сборка и запуск контейнеров..."
-    $COMPOSE up -d --build "$SCRAPER_SERVICE" "$BOT_SERVICE" "$ADMIN_SERVICE"
-    info "Бот, скрапер и админка запущены. Логи: ./deploy.sh logs"
+    $COMPOSE up -d --build $(app_services)
+    info "Контейнеры запущены. Логи: ./deploy.sh logs"
     ;;
 
   stop)
@@ -180,7 +207,7 @@ case "$cmd" in
 
   restart)
     info "Перезапуск контейнеров..."
-    $COMPOSE restart "$SCRAPER_SERVICE" "$BOT_SERVICE" "$ADMIN_SERVICE"
+    $COMPOSE restart $(app_services)
     info "Контейнеры перезапущены."
     ;;
 
@@ -191,9 +218,10 @@ case "$cmd" in
     $COMPOSE up -d "$POSTGRES_SERVICE"
     backup_before_migrate
     apply_migrations
+    ensure_runtime_dirs
     info "Пересборка образа..."
-    $COMPOSE up -d --build --force-recreate "$SCRAPER_SERVICE" "$BOT_SERVICE" "$ADMIN_SERVICE"
-    info "Бот, скрапер и админка обновлены и перезапущены."
+    $COMPOSE up -d --build --force-recreate $(app_services)
+    info "Контейнеры обновлены и перезапущены."
     ;;
 
   logs)
@@ -201,7 +229,7 @@ case "$cmd" in
     ;;
 
   status)
-    $COMPOSE ps "$BOT_SERVICE" "$SCRAPER_SERVICE" "$ADMIN_SERVICE" "$POSTGRES_SERVICE"
+    $COMPOSE ps $(app_services) "$POSTGRES_SERVICE"
     echo ""
     info "Использование ресурсов:"
     docker stats job_scraper_bot job_scraper_app job_scraper_admin job_scraper_db --no-stream 2>/dev/null || warn "Контейнеры не запущены."

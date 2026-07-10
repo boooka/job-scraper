@@ -25,6 +25,23 @@ ALLOWED_HOSTS = [
     h.strip() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",") if h.strip()
 ]
 
+# Behind a TLS-terminating reverse proxy (Caddy). Trust the forwarded scheme so
+# request.is_secure() is correct — otherwise CSRF checks and secure cookies break.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+# Django 4+ requires the exact https origin(s) for POST (e.g. admin login),
+# else "403 CSRF verification failed". Set DJANGO_CSRF_TRUSTED_ORIGINS to
+# "https://your-domain" (comma-separated for several).
+CSRF_TRUSTED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",")
+    if o.strip()
+]
+# Send session/CSRF cookies only over HTTPS. Enable in prod (behind Caddy);
+# leave off for plain-http local/tunnel access.
+_secure_cookies = os.environ.get("DJANGO_SECURE_COOKIES", "false").lower() in ("1", "true", "yes")
+SESSION_COOKIE_SECURE = _secure_cookies
+CSRF_COOKIE_SECURE = _secure_cookies
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
