@@ -170,22 +170,28 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ── Deploy (SSH to server) ────────────────────────────────────────
+  # Runs only after lint AND test pass on a push to main, so production never
+  # gets code that failed the gates. Git-based: the server pulls main and
+  # rebuilds via deploy-local.sh (backup + migrations + rebuild).
   deploy:
     name: Deploy to Production
     runs-on: ubuntu-latest
-    needs: docker
-    if: github.ref == 'refs/heads/main'
+    needs: [lint, test]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment: production
 
     steps:
-      - name: Deploy via SSH
+      - name: Deploy via SSH (git pull + rebuild)
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
+          port: ${{ secrets.DEPLOY_PORT }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
-            cd /opt/job-scraper
-            docker compose pull scraper
-            docker compose up -d --no-deps scraper
-            docker image prune -f
+            set -e
+            cd ~/job_scraper
+            git fetch origin --quiet
+            git checkout -B main origin/main
+            export COMPOSE_FILE=docker-compose.prod.yml
+            ./deploy/deploy-local.sh update
