@@ -17,15 +17,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
 from src.db.engine import get_session
-from src.db.repository import TranslationRepository
+from src.db.repository import ScheduleRepository, TranslationRepository
 from src.logger import get_logger
 from src.models.orm import Vacancy, VacancyTranslation
-from src.services.deepl_client import get_deepl_client
+from src.services.deepl_client import DeepLQuotaExceeded, get_deepl_client
 from src.services.metrics import metrics_registry
 
 log = get_logger(__name__)
 
 TRANSLATOR_NAME = "deepl"
+# schedules.job_id of the catch-up job (matches scheduler._JOB_REGISTRY).
+_TRANSLATION_JOB_ID = "translations"
 
 # run_pending_translations вызывается из разных мест:
 # - scheduler catch-up job (каждую минуту)
@@ -184,11 +186,27 @@ async def _translate_jobs(
             desc_map = await _translate_with_cache(desc_texts, language=language)
             for idx in desc_indices:
                 translated_descriptions[idx] = desc_map[descriptions[idx]]
+        except DeepLQuotaExceeded:
+            # Quota is a hard stop — do not swallow it as an optional-desc failure.
+            raise
         except Exception as exc:
             log.warning("deepl.descriptions_failed", error=str(exc))
             # Continue — titles are more important, descriptions are optional
 
     return [(job, translated_titles[i], translated_descriptions[i]) for i, job in enumerate(jobs)]
+
+
+async def _disable_translation_schedule() -> None:
+    """Turn the ``translations`` schedule off after a quota-exceeded error.
+
+    The scheduler reloads the table each minute, so this stops the catch-up job
+    from firing until an admin re-enables it (quota reset / plan upgrade)."""
+    try:
+        async with get_session() as session:
+            await ScheduleRepository(session).set_enabled(_TRANSLATION_JOB_ID, False)
+        log.warning("translation.schedule_disabled", reason="deepl_quota_exceeded")
+    except Exception as exc:  # never mask the original quota error
+        log.error("translation.schedule_disable_failed", error=str(exc))
 
 
 async def run_pending_translations(language: str | None = None) -> dict[str, int]:
@@ -228,6 +246,13 @@ async def run_pending_translations(language: str | None = None) -> dict[str, int
 
             try:
                 results = await _translate_jobs(jobs, lang)
+            except DeepLQuotaExceeded as exc:
+                # Quota spent for the period: stop now and disable the schedule so
+                # the scheduler stops retrying until an admin re-enables it.
+                log.error("translation.quota_exceeded", language=lang, error=str(exc))
+                summary["failed"] += len(jobs)
+                await _disable_translation_schedule()
+                break
             except Exception as exc:
                 log.error("translation.batch_failed", language=lang, error=str(exc))
                 summary["failed"] += len(jobs)

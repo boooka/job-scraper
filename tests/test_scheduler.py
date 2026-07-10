@@ -62,6 +62,24 @@ async def test_seed_missing_is_idempotent(db_session):
 
 
 @pytest.mark.asyncio
+async def test_set_enabled(db_session):
+    repo = ScheduleRepository(db_session)
+    await repo.seed_missing(
+        [
+            {
+                "job_id": "translations",
+                "name": "DeepL translation catch-up",
+                "cron": "*/15 * * * *",
+                "enabled": True,
+            }
+        ]
+    )
+    await repo.set_enabled("translations", False)
+    rows = await repo.list_all()
+    assert rows[0].enabled is False
+
+
+@pytest.mark.asyncio
 async def test_clear_run_now(db_session):
     repo = ScheduleRepository(db_session)
     await repo.seed_missing(

@@ -13,6 +13,13 @@ DEEPL_API_URL = "https://api-free.deepl.com/v2/translate"  # free tier
 DEEPL_API_URL_PRO = "https://api.deepl.com/v2/translate"  # paid tier
 
 
+class DeepLQuotaExceeded(Exception):
+    """DeepL returned HTTP 456 — the character quota for the period is spent.
+
+    Retrying is pointless until the quota resets or the plan is upgraded, so
+    callers should stop the batch and back off (e.g. disable the schedule)."""
+
+
 class DeepLClient:
     """Async DeepL API client."""
 
@@ -54,6 +61,10 @@ class DeepLClient:
                 headers={"Authorization": f"DeepL-Auth-Key {self._api_key}"},
                 json=payload,
             )
+            # 456 = quota exceeded — surface a distinct error so callers can
+            # stop instead of hammering the API for the rest of the period.
+            if response.status_code == 456:
+                raise DeepLQuotaExceeded("DeepL character quota exceeded (HTTP 456)")
             response.raise_for_status()
 
         data = response.json()

@@ -1072,6 +1072,12 @@ class ScheduleRepository:
             update(Schedule).where(Schedule.job_id == job_id).values(run_now_requested_at=None)
         )
 
+    async def set_enabled(self, job_id: str, enabled: bool) -> None:
+        """Toggle a job on/off (no-op if the row does not exist)."""
+        await self._session.execute(
+            update(Schedule).where(Schedule.job_id == job_id).values(enabled=enabled)
+        )
+
 
 class StatsRepository:
     """Aggregate counters for the daily admin health report."""
