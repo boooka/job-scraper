@@ -267,6 +267,16 @@ docker compose up -d admin
 docker compose exec admin python manage.py createsuperuser
 ```
 
+**Schedules** — the four scrapers plus translation/notification/report jobs have
+their cron expressions in the `schedules` table, editable in the admin. The
+scheduler seeds it from `.env` on first start, then reloads once a minute:
+changed crons reschedule live, jobs enable/disable, and the **Run now** action
+fires a job out of schedule — all without restarting the `scraper` container.
+
+**In production the admin is hardened** (see [Secure remote deploy](#secure-remote-deploy-single-vps)):
+it lives under a secret URL path (`DJANGO_ADMIN_PATH`), not `/admin`, and sits
+behind Caddy HTTP Basic Auth on top of the Django login.
+
 
 
 ## Configuration (`.env`)
@@ -285,8 +295,10 @@ SCHEDULE_TRANSLATIONS=*/15 * * * *
 SCHEDULE_SUBSCRIPTION_NOTIFICATIONS=*/10 * * * *
 SCHEDULE_DAILY_REPORT=0 9 * * *
 
-# DeepL
-DEEPL_API_KEY=...
+# DeepL — one or more keys, comma-separated. The client rotates on quota
+# (HTTP 456); translations stop only when ALL keys are spent, at which point
+# the `translations` schedule is auto-disabled and the daily report warns.
+DEEPL_API_KEY=key1:fx,key2:fx
 DEEPL_TARGET_LANG=RU
 
 # Telegram
@@ -300,6 +312,12 @@ DAILY_REPORT_STALE_HOURS=24
 DJANGO_SECRET_KEY=change-me
 DJANGO_DEBUG=false
 DJANGO_ALLOWED_HOSTS=*
+
+# Production-only (docker-compose.prod.yml + Caddy)
+ADMIN_DOMAIN=joblt.example.com        # domain Caddy issues a TLS cert for
+DJANGO_ADMIN_PATH=some-secret-path    # admin URL instead of /admin
+ADMIN_BASIC_USER=admin                # Caddy Basic Auth user
+ADMIN_BASIC_HASH=$2a$14$...           # bcrypt hash (no quotes — env_file literal)
 ```
 
 
@@ -370,6 +388,36 @@ docker compose restart scraper
 docker compose exec postgres pg_dump -U scraper -d job_scraper > backup.sql
 cat backup.sql | docker compose exec -T postgres psql -U scraper -d job_scraper
 ```
+
+### Secure remote deploy (single VPS)
+
+`docker-compose.prod.yml` targets a single VPS (e.g. Hetzner CX23): Postgres is
+not exposed, containers have memory limits and log rotation, and a **Caddy**
+service terminates TLS (auto Let's Encrypt for `ADMIN_DOMAIN`) in front of the
+admin. Two layers protect the admin:
+
+1. **Secret URL path** — `DJANGO_ADMIN_PATH` replaces `/admin`; `/admin` and `/`
+   return 404 with no redirect leaking the real path.
+2. **Caddy HTTP Basic Auth** — a second factor before the Django login. Generate
+   the hash with `docker run --rm caddy:2-alpine caddy hash-password --plaintext '…'`
+   and put `ADMIN_BASIC_USER` / `ADMIN_BASIC_HASH` in `.env` (hash **unquoted** —
+   `env_file` passes it literally so the bcrypt `$` survives).
+
+All server ops run **from your machine** via `deploy/deploy-remote.sh` (config in
+`deploy/remote.conf.local`) — no server shell needed:
+
+```bash
+./deploy/deploy-remote.sh push              # rsync code + rebuild + migrate + restart
+./deploy/deploy-remote.sh migrate           # apply migrations
+./deploy/deploy-remote.sh createsuperuser   # interactive, over SSH
+./deploy/deploy-remote.sh changepassword <user>
+./deploy/deploy-remote.sh manage <cmd> …    # any manage.py command
+./deploy/deploy-remote.sh logs | status | backup | restore-db [file]
+```
+
+> Shell scripts and configs are pinned to LF via `.gitattributes` — a CRLF
+> checkout on Windows would otherwise break the shebang on the server
+> (`env: bash\r`).
 
 
 
