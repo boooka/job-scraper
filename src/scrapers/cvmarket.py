@@ -32,7 +32,7 @@ class CVMarketScraper(BaseScraper):
                 url = f"{BASE_URL}?start={start}"
                 log.info("cvmarket.fetch_page", start=start, url=url)
 
-                await page.goto(url, wait_until="domcontentloaded")
+                await self.safe_goto(page, url)
                 await page.wait_for_selector(
                     "//section[@data-component='jobs_list']",
                     timeout=15_000,

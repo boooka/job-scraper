@@ -10,6 +10,7 @@ import traceback
 from collections.abc import AsyncGenerator
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+from playwright.async_api import Error as PlaywrightError
 from tenacity import retry, stop_after_attempt, wait_fixed
 
 from src.config import settings
@@ -59,6 +60,9 @@ class BaseScraper(abc.ABC):
                 "--no-sandbox",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
+                # Force HTTP/1.1 — some boards (e.g. cvmarket) reset the HTTP/2
+                # connection on deep pagination, causing ERR_HTTP2_PROTOCOL_ERROR.
+                "--disable-http2",
             ],
         )
         self._context = await self._browser.new_context(
@@ -117,6 +121,31 @@ class BaseScraper(abc.ABC):
         log.info("scraper.done", source=self.source, count=len(results))
         return results
 
+    async def safe_goto(
+        self, page: Page, url: str, *, wait_until: str = "domcontentloaded"
+    ) -> None:
+        """Navigate with a few retries and backoff.
+
+        Job boards intermittently reset the connection on deep pagination
+        (net::ERR_HTTP2_PROTOCOL_ERROR, timeouts). Retrying just this navigation
+        avoids restarting the whole scrape via the outer ``run`` retry.
+        """
+        attempts = max(1, settings.retry_max_attempts)
+        for attempt in range(1, attempts + 1):
+            try:
+                await page.goto(url, wait_until=wait_until)
+                return
+            except PlaywrightError as exc:
+                if attempt >= attempts:
+                    raise
+                log.warning(
+                    "scraper.goto_retry",
+                    url=url,
+                    attempt=attempt,
+                    error=str(exc).splitlines()[0],
+                )
+                await asyncio.sleep(settings.retry_wait_seconds)
+
     # ------------------------------------------------------------------
     # Abstract methods
     # ------------------------------------------------------------------
@@ -145,7 +174,7 @@ class BaseScraper(abc.ABC):
             if self.detail_fetch_delay_ms:
                 await asyncio.sleep(self.detail_fetch_delay_ms / 1000)
 
-            await self._detail_page.goto(url, wait_until="domcontentloaded")
+            await self.safe_goto(self._detail_page, url)
             page_html = await self._detail_page.content()
             log.debug("detail_page.fetched", url=url, size=len(page_html))
             return page_html

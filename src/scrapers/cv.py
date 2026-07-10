@@ -32,7 +32,7 @@ class CVScraper(BaseScraper):
                 url = f"{BASE_URL}?start={offset}"
                 log.info("cv.fetch_page", page=page_num, url=url)
 
-                await page.goto(url, wait_until="domcontentloaded")
+                await self.safe_goto(page, url)
                 await page.wait_for_selector("//article", timeout=15_000)
 
                 items = await page.query_selector_all("//article[@data-component='jobad']")
