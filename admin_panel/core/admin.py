@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import re
 
 from django import forms
 from django.contrib import admin, messages
-from django.db.models import Count, Q
+from django.db.models import Count, OuterRef, Q, Subquery
 from django.utils import timezone
 
 from core.models import (
@@ -25,6 +26,8 @@ from core.models import (
 )
 
 _CRON_FIELD = re.compile(r"[A-Za-z0-9*/,\-]+")
+# Language whose translation is shown in the vacancy list (mirrors DEEPL_TARGET_LANG).
+_TARGET_LANG = os.environ.get("DEEPL_TARGET_LANG", "RU")
 
 
 class ReadOnlyAdminMixin:
@@ -211,6 +214,7 @@ class CompanyAutocompleteFilter(RelatedAutocompleteFilter):
 class VacancyAdmin(admin.ModelAdmin):
     list_display = (
         "title",
+        "title_translated",
         "source",
         "company_name",
         "location",
@@ -237,6 +241,17 @@ class VacancyAdmin(admin.ModelAdmin):
     list_select_related = ("company", "city")
     readonly_fields = ("id", "first_seen_at", "last_seen_at")
     inlines = (VacancyTranslationInline, VacancyChangeInline)
+
+    def get_queryset(self, request):
+        # Pull the target-language title in one query (avoids N+1 over translations).
+        translated = VacancyTranslation.objects.filter(
+            vacancy_id=OuterRef("pk"), language=_TARGET_LANG
+        ).values("title_translated")[:1]
+        return super().get_queryset(request).annotate(_title_translated=Subquery(translated))
+
+    @admin.display(description="Название (перевод)", ordering="_title_translated")
+    def title_translated(self, obj):
+        return obj._title_translated or "—"
 
 
 @admin.register(VacancyTranslation)
