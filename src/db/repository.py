@@ -1042,6 +1042,10 @@ class ScheduleRepository:
         result = await self._session.execute(select(Schedule).order_by(Schedule.id))
         return result.scalars().all()
 
+    async def get(self, job_id: str) -> Schedule | None:
+        result = await self._session.execute(select(Schedule).where(Schedule.job_id == job_id))
+        return result.scalar_one_or_none()
+
     async def seed_missing(self, defaults: Iterable[dict[str, Any]]) -> int:
         """Insert a row for every job_id not yet present. Returns count inserted.
 

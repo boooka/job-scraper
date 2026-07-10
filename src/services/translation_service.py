@@ -234,6 +234,8 @@ async def run_pending_translations(language: str | None = None) -> dict[str, int
         return summary
 
     async with _translation_lock:
+        # Re-probe every key this run — quotas may have reset since last time.
+        get_deepl_client().reset_exhausted()
         while True:
             async with get_session() as session:
                 jobs = await _fetch_untranslated(session, lang, batch_size)

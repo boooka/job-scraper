@@ -12,13 +12,15 @@ from typing import Any
 
 from src.config import settings
 from src.db.engine import get_session
-from src.db.repository import StatsRepository
+from src.db.repository import ScheduleRepository, StatsRepository
 from src.logger import get_logger
+from src.services.deepl_client import get_deepl_client
 
 log = get_logger(__name__)
 
 # Fixed order so the report reads the same every day, even for silent sources.
 _SOURCES = ("cvbankas", "cvonline", "cvmarket", "cv")
+_TRANSLATION_JOB_ID = "translations"
 
 
 def format_daily_report(stats: dict[str, Any], *, stale_hours: int) -> str:
@@ -61,6 +63,23 @@ def format_daily_report(stats: dict[str, Any], *, stale_hours: int) -> str:
         f"Переведено за период: {stats['translated_since']} "
         f"(всего переводов: {stats['translated_total']})"
     )
+
+    deepl = stats.get("deepl")
+    if deepl and deepl["configured"]:
+        if not deepl["translations_enabled"]:
+            lines.append(
+                "⚠️ Переводы ОТКЛЮЧЕНЫ: исчерпаны все ключи DeepL. "
+                "Включите задачу translations в админке после сброса квоты."
+            )
+        for u in deepl["keys"]:
+            if u.get("count") is None:
+                lines.append(f"  • DeepL {u['key']}: статус недоступен")
+            else:
+                left = max(u["limit"] - u["count"], 0)
+                mark = " ❗исчерпан" if u["exhausted"] else ""
+                lines.append(
+                    f"  • DeepL {u['key']}: {u['count']}/{u['limit']} (осталось {left}){mark}"
+                )
     lines.append("")
 
     # Overall totals
@@ -87,6 +106,21 @@ async def build_daily_report() -> tuple[str, dict[str, Any]]:
 
     async with get_session() as session:
         stats = await StatsRepository(session).daily_report(since)
+        sched = await ScheduleRepository(session).get(_TRANSLATION_JOB_ID)
+
+    keys = settings.deepl_api_key_list
+    deepl_keys: list[dict] = []
+    if keys:
+        try:
+            deepl_keys = await get_deepl_client().get_usage_all()
+        except Exception as exc:  # usage is informational — never break the report
+            log.warning("daily_report.deepl_usage_failed", error=str(exc))
+    stats["deepl"] = {
+        "configured": len(keys),
+        # No row yet (never seeded) ⇒ treat as enabled by default.
+        "translations_enabled": sched.enabled if sched else True,
+        "keys": deepl_keys,
+    }
 
     report = format_daily_report(stats, stale_hours=stale_hours)
     log.info(

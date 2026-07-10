@@ -44,7 +44,9 @@ class Settings(BaseSettings):
     retry_max_attempts: int = Field(default=3)
     retry_wait_seconds: int = Field(default=10)
 
-    # DeepL
+    # DeepL — one or more API keys, comma-separated. The client rotates to the
+    # next key on quota-exceeded (HTTP 456); translations stop only when all are
+    # spent. Keys ending in ":fx" are free-tier, others are Pro.
     deepl_api_key: str = Field(default="")
     deepl_target_lang: str = Field(default="RU")
     deepl_batch_size: int = Field(default=50)
@@ -77,6 +79,11 @@ class Settings(BaseSettings):
     log_format: str = Field(default="json")
     app_log_path: str = Field(default="logs/app/app.log")
     scraper_log_path: str = Field(default="logs/scraper/scraper.log")
+
+    @property
+    def deepl_api_key_list(self) -> list[str]:
+        """DeepL keys parsed from the comma-separated ``deepl_api_key``."""
+        return [k.strip() for k in self.deepl_api_key.split(",") if k.strip()]
 
 
 settings = Settings()
