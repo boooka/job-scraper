@@ -8,7 +8,12 @@ admin a way to read and write the existing data.
 
 from __future__ import annotations
 
+import os
+
 from django.db import models
+
+# Language whose translation represents a vacancy in the admin (DEEPL_TARGET_LANG).
+_TARGET_LANG = os.environ.get("DEEPL_TARGET_LANG", "RU")
 
 
 class CompanyGroup(models.Model):
@@ -136,7 +141,14 @@ class Vacancy(models.Model):
         verbose_name_plural = "Vacancies"
 
     def __str__(self) -> str:
-        return f"{self.source}:{self.external_id} {self.title}"
+        # Represent a vacancy by its translated title, falling back to the
+        # original when no translation exists.
+        translated = (
+            self.translations.filter(language=_TARGET_LANG)
+            .values_list("title_translated", flat=True)
+            .first()
+        )
+        return f"{self.source}:{self.external_id} {translated or self.title}"
 
 
 class VacancyTranslation(models.Model):
