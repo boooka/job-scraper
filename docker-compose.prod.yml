@@ -128,6 +128,7 @@ services:
       DJANGO_ALLOWED_HOSTS: "${ADMIN_DOMAIN:?set ADMIN_DOMAIN in .env},localhost,127.0.0.1"
       DJANGO_CSRF_TRUSTED_ORIGINS: "https://${ADMIN_DOMAIN}"
       DJANGO_SECURE_COOKIES: "true"
+      DJANGO_ADMIN_PATH: ${DJANGO_ADMIN_PATH:?set DJANGO_ADMIN_PATH in .env}
     # Порт наружу НЕ пробрасывается — доступ только через Caddy (admin:8000
     # внутри сети compose). collectstatic пишет в общий volume static_files.
     volumes:
