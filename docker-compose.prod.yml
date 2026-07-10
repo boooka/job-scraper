@@ -1,0 +1,143 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Production compose — предназначен для одиночного VPS (напр. Hetzner CX22:
+# 2 vCPU / 4 ГБ RAM / 40 ГБ SSD).
+#
+# Отличия от dev docker-compose.yml:
+#   • Postgres НЕ пробрасывает порт наружу — доступен только внутри сети compose.
+#   • Admin слушает только 127.0.0.1 — доступ через SSH-туннель, без TLS наружу.
+#   • Заданы memory-лимиты под 4 ГБ RAM (сумма ~2.8 ГБ + shm, остальное ОС/докер).
+#   • Ротация docker-логов (json-file, max-size/max-file) на всех сервисах.
+#   • DATABASE_URL собирается из POSTGRES_* — единый источник истины для пароля.
+#
+# Запуск на сервере:
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# В .env на сервере ОБЯЗАТЕЛЬНО задать (остальное — как обычно):
+#   POSTGRES_PASSWORD=<надёжный-пароль>
+#   POSTGRES_USER=scraper           # опционально, дефолт scraper
+#   POSTGRES_DB=job_scraper         # опционально, дефолт job_scraper
+#   DJANGO_SECRET_KEY=<случайный-ключ>
+# Старый DATABASE_URL=...@localhost в .env можно оставить — здесь он
+# перекрывается собранным из POSTGRES_* (хост postgres).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Общие настройки ротации docker-логов (json-file), подключаются через <<: *logging
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+# Единый DSN для всех сервисов приложения (asyncpg; Django сам заменит драйвер).
+x-database-url: &database_url
+  DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-scraper}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-job_scraper}"
+
+services:
+  # ── PostgreSQL ────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: job_scraper_db
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-job_scraper}
+      POSTGRES_USER: ${POSTGRES_USER:-scraper}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    # НЕТ ports: — БД доступна только сервисам внутри сети compose.
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-scraper} -d ${POSTGRES_DB:-job_scraper}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ── Migrations (run once, then exit) ──────────────────────────────────
+  migrate:
+    build: .
+    container_name: job_scraper_migrate
+    command: ["sh", "-c", "alembic upgrade head"]
+    logging: *logging
+    environment:
+      <<: *database_url
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # ── Scraper scheduler (Playwright/Chromium — главный потребитель RAM) ──
+  scraper:
+    build: .
+    container_name: job_scraper_app
+    restart: unless-stopped
+    logging: *logging
+    command: ["python", "-m", "src.main", "scheduler"]
+    env_file: .env
+    environment:
+      <<: *database_url
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/logs
+    shm_size: "512m"  # Chromium использует /dev/shm; без этого возможны падения
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: "2.0"
+
+  # ── Telegram bot (24/7, лёгкий) ───────────────────────────────────────
+  bot:
+    build: .
+    container_name: job_scraper_bot
+    restart: unless-stopped
+    logging: *logging
+    command: ["python", "-m", "src.main", "bot"]
+    env_file: .env
+    environment:
+      <<: *database_url
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/logs
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+  # ── Django admin panel (доступ только по SSH-туннелю) ─────────────────
+  admin:
+    build:
+      context: .
+      dockerfile: Dockerfile.django
+    container_name: job_scraper_admin
+    restart: unless-stopped
+    logging: *logging
+    env_file: .env
+    environment:
+      <<: *database_url
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
+      DJANGO_DEBUG: "false"
+      # За localhost-биндом можно оставить *, наружу порт не выставлен.
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-*}
+    # Слушает только петлю — открыть в браузере через:
+    #   ssh -L 8000:localhost:8000 <user>@<host>  → http://localhost:8000
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+volumes:
+  postgres_data:

@@ -16,6 +16,7 @@ set -euo pipefail
 COMPOSE="docker compose"
 BOT_SERVICE="bot"
 SCRAPER_SERVICE="scraper"
+ADMIN_SERVICE="admin"
 POSTGRES_SERVICE="postgres"
 BACKUP_DIR="./backups"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
@@ -166,9 +167,9 @@ case "$cmd" in
     $COMPOSE up -d "$POSTGRES_SERVICE"
     backup_before_migrate
     apply_migrations
-    info "Сборка и запуск контейнера..."
-    $COMPOSE up -d --build "$SCRAPER_SERVICE" "$BOT_SERVICE"
-    info "Бот запущен. Логи: ./deploy.sh logs"
+    info "Сборка и запуск контейнеров..."
+    $COMPOSE up -d --build "$SCRAPER_SERVICE" "$BOT_SERVICE" "$ADMIN_SERVICE"
+    info "Бот, скрапер и админка запущены. Логи: ./deploy.sh logs"
     ;;
 
   stop)
@@ -178,9 +179,9 @@ case "$cmd" in
     ;;
 
   restart)
-    info "Перезапуск контейнера..."
-    $COMPOSE restart "$SCRAPER_SERVICE" "$BOT_SERVICE"
-    info "Контейнер перезапущен."
+    info "Перезапуск контейнеров..."
+    $COMPOSE restart "$SCRAPER_SERVICE" "$BOT_SERVICE" "$ADMIN_SERVICE"
+    info "Контейнеры перезапущены."
     ;;
 
   update)
@@ -191,8 +192,8 @@ case "$cmd" in
     backup_before_migrate
     apply_migrations
     info "Пересборка образа..."
-    $COMPOSE up -d --build --force-recreate "$SCRAPER_SERVICE" "$BOT_SERVICE"
-    info "Бот обновлён и перезапущен."
+    $COMPOSE up -d --build --force-recreate "$SCRAPER_SERVICE" "$BOT_SERVICE" "$ADMIN_SERVICE"
+    info "Бот, скрапер и админка обновлены и перезапущены."
     ;;
 
   logs)
@@ -200,10 +201,10 @@ case "$cmd" in
     ;;
 
   status)
-    $COMPOSE ps "$BOT_SERVICE" "$SCRAPER_SERVICE" "$POSTGRES_SERVICE"
+    $COMPOSE ps "$BOT_SERVICE" "$SCRAPER_SERVICE" "$ADMIN_SERVICE" "$POSTGRES_SERVICE"
     echo ""
     info "Использование ресурсов:"
-    docker stats job_scraper_bot job_scraper_app job_scraper_db --no-stream 2>/dev/null || warn "Контейнеры не запущены."
+    docker stats job_scraper_bot job_scraper_app job_scraper_admin job_scraper_db --no-stream 2>/dev/null || warn "Контейнеры не запущены."
     ;;
 
   backup)
