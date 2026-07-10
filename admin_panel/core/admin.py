@@ -234,7 +234,15 @@ class VacancyAdmin(admin.ModelAdmin):
         "welcome_ukraine",
         "salary_currency",
     )
-    search_fields = ("title", "company_name", "external_id", "location")
+    # Search matches the original title and the translated title (via the
+    # reverse relation); Django adds DISTINCT automatically for the join.
+    search_fields = (
+        "title",
+        "translations__title_translated",
+        "company_name",
+        "external_id",
+        "location",
+    )
     # autocomplete_fields (not raw_id) both gives Select2 on the change form and
     # authorizes the admin:autocomplete endpoint to serve city/company here.
     autocomplete_fields = ("company", "city")
