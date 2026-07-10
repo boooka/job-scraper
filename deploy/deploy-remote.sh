@@ -4,7 +4,7 @@
 # Требуется: ssh, rsync (для push). На сервере: docker, docker compose.
 #
 # Использование (из корня проекта или из deploy/):
-#   ./deploy/deploy-remote.sh push     — синхронизировать код и перезапустить бота
+#   ./deploy/deploy-remote.sh push     — git push + git pull на сервере + пересборка
 #   ./deploy/deploy-remote.sh setup    — первый раз на сервере: создать каталог, .env, запустить
 #   ./deploy/deploy-remote.sh start    — запустить контейнер на сервере
 #   ./deploy/deploy-remote.sh stop     — остановить на сервере
@@ -60,21 +60,14 @@ cmd="${1:-help}"
 
 case "$cmd" in
   push)
-    info "Синхронизация кода на $REMOTE:$REMOTE_DIR ..."
-    rsync -avz --delete \
-      -e "ssh ${SSH_OPTS[*]}" \
-      --exclude='.git' \
-      --exclude='data' \
-      --exclude='.env' \
-      --exclude='backups' \
-      --exclude='__pycache__' \
-      --exclude='*.pyc' \
-      --exclude='.venv' \
-      --exclude='deploy/remote.conf.local' \
-      "$PROJECT_ROOT/" \
-      "$REMOTE:$REMOTE_DIR/"
-    info "Перезапуск сервисов на сервере (с автобэкапом перед миграциями)..."
-    ssh_cmd "cd $REMOTE_DIR && ./deploy/deploy-local.sh update"
+    # Git-based deploy: push the current branch to origin, then the server
+    # pulls it. (No rsync — mixing rsync with the server's `git pull` leaves the
+    # working tree dirty and blocks the merge.)
+    branch="$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD)"
+    info "Локальный git push: origin/$branch ..."
+    git -C "$PROJECT_ROOT" push origin "$branch"
+    info "Деплой на сервере (git pull + автобэкап + миграции + пересборка)..."
+    ssh_cmd "cd $REMOTE_DIR && git pull --ff-only origin $branch && ./deploy/deploy-local.sh update"
     info "Готово."
     ;;
   setup)
