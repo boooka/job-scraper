@@ -147,11 +147,13 @@ services:
     container_name: job_scraper_caddy
     restart: unless-stopped
     logging: *logging
-    # env_file passes values literally (no interpolation) — needed because the
-    # bcrypt hash in ADMIN_BASIC_HASH contains '$' that compose would mangle.
-    env_file: .env
     environment:
       ADMIN_DOMAIN: ${ADMIN_DOMAIN:?set ADMIN_DOMAIN in .env}
+      ADMIN_BASIC_USER: ${ADMIN_BASIC_USER:?set ADMIN_BASIC_USER in .env}
+      # bcrypt hash — in .env every '$' MUST be doubled to '$$' so compose does
+      # not try to expand it as a variable (that blanks the hash). Compose turns
+      # '$$' back into a single '$' before passing it to the container.
+      ADMIN_BASIC_HASH: ${ADMIN_BASIC_HASH:?set ADMIN_BASIC_HASH in .env}
     ports:
       - "80:80"     # нужен для ACME HTTP-01 challenge и редиректа на https
       - "443:443"

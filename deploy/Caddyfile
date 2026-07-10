@@ -6,8 +6,8 @@
 	encode zstd gzip
 
 	# HTTP Basic Auth перед всем сайтом — второй фактор поверх Django-логина.
-	# Пользователь и bcrypt-хеш берутся из окружения (см. .env). Хеш генерится:
-	#   docker run --rm caddy:2-alpine caddy hash-password --plaintext 'пароль'
+	# Пользователь и bcrypt-хеш берутся из окружения (см. .env; в .env каждый '$'
+	# в хеше удваивается до '$$', сюда Caddy получает уже нормальный хеш).
 	basic_auth {
 		{$ADMIN_BASIC_USER} {$ADMIN_BASIC_HASH}
 	}

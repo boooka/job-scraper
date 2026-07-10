@@ -317,7 +317,7 @@ DJANGO_ALLOWED_HOSTS=*
 ADMIN_DOMAIN=joblt.example.com        # domain Caddy issues a TLS cert for
 DJANGO_ADMIN_PATH=some-secret-path    # admin URL instead of /admin
 ADMIN_BASIC_USER=admin                # Caddy Basic Auth user
-ADMIN_BASIC_HASH=$2a$14$...           # bcrypt hash (no quotes — env_file literal)
+ADMIN_BASIC_HASH=$$2a$$14$$...        # bcrypt hash — double every $ to $$
 ```
 
 
@@ -399,9 +399,15 @@ admin. Two layers protect the admin:
 1. **Secret URL path** — `DJANGO_ADMIN_PATH` replaces `/admin`; `/admin` and `/`
    return 404 with no redirect leaking the real path.
 2. **Caddy HTTP Basic Auth** — a second factor before the Django login. Generate
-   the hash with `docker run --rm caddy:2-alpine caddy hash-password --plaintext '…'`
-   and put `ADMIN_BASIC_USER` / `ADMIN_BASIC_HASH` in `.env` (hash **unquoted** —
-   `env_file` passes it literally so the bcrypt `$` survives).
+   the hash with the `$` already doubled (compose would otherwise expand `$…` in
+   the hash and blank it):
+
+   ```bash
+   docker run --rm caddy:2-alpine caddy hash-password --plaintext 'пароль' | sed 's/\$/\$\$/g'
+   ```
+
+   Put `ADMIN_BASIC_USER` / `ADMIN_BASIC_HASH` in `.env` with every `$` in the
+   hash doubled to `$$` (e.g. `ADMIN_BASIC_HASH=$$2a$$14$$…`).
 
 All server ops run **from your machine** via `deploy/deploy-remote.sh` (config in
 `deploy/remote.conf.local`) — no server shell needed:
