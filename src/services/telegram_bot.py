@@ -37,6 +37,7 @@ from src.db.repository import (
     VacancySearchRepository,
 )
 from src.logger import get_logger
+from src.services.admin_notifier import build_daily_report
 from src.services.metrics import metrics_registry
 from src.services.search_query import parse_search_query
 from src.services.subscription_notifier import get_last_notification_stats
@@ -109,6 +110,7 @@ class TelegramBotService:
         self._pending_user_action: dict[int, str] = {}
         self._search_context_by_user: dict[int, dict[str, Any]] = {}
         self._context_location_choices: dict[int, list[str]] = {}
+        self._context_company_choices: dict[int, list[str]] = {}
         # Last executed search query per user — fallback for the inline
         # "Подписаться" button when its short-lived token has expired.
         self._last_search_query: dict[int, str] = {}
@@ -181,6 +183,8 @@ class TelegramBotService:
         company: str,
         location: str,
         url: str,
+        salary: str | None = None,
+        updated: str | None = None,
     ) -> str:
         """Build a MarkdownV2-safe vacancy card string."""
         safe_title = cls._escape_md(title)
@@ -188,7 +192,16 @@ class TelegramBotService:
         safe_location = cls._escape_md(location)
         # URL can contain characters special for MarkdownV2 in plain text context.
         safe_url = cls._escape_md(url)
-        return f"*{safe_title}*\n_{safe_company} \\| {safe_location}_\n{safe_url}"
+        lines = [f"*{safe_title}*", f"_{safe_company} \\| {safe_location}_"]
+        meta: list[str] = []
+        if salary:
+            meta.append("💰 " + cls._escape_md(salary))
+        if updated:
+            meta.append("🕒 " + cls._escape_md(updated))
+        if meta:
+            lines.append(" · ".join(meta))
+        lines.append(safe_url)
+        return "\n".join(lines)
 
     @staticmethod
     def _row_location(row: Any) -> str:
@@ -198,6 +211,52 @@ class TelegramBotService:
         if loc is None:
             loc = getattr(row, "location", None)
         return loc or "Unknown location"
+
+    @staticmethod
+    def _row_company(row: Any) -> str:
+        """Display label for a vacancy's company — canonical group name when
+        available, otherwise the raw scraped company name."""
+        name = getattr(row, "display_company", None)
+        if name is None:
+            name = getattr(row, "company_name", None)
+        return name or "Unknown company"
+
+    @staticmethod
+    def _row_salary(row: Any) -> str | None:
+        """Human-readable salary, or None when the vacancy has no salary."""
+        smin = getattr(row, "salary_min", None)
+        smax = getattr(row, "salary_max", None)
+        if not smin and not smax:
+            return None
+        if smin and smax:
+            amount = f"{smin}–{smax}"
+        elif smin:
+            amount = f"от {smin}"
+        else:
+            amount = f"до {smax}"
+        currency = getattr(row, "salary_currency", None) or ""
+        symbol = {"EUR": "€", "USD": "$"}.get(currency, currency)
+        if symbol:
+            amount = f"{amount} {symbol}"
+        period = {"month": "/мес", "hour": "/час"}.get(
+            getattr(row, "salary_period", None) or "", ""
+        )
+        amount += period
+        stype = getattr(row, "salary_type", None)
+        if stype == "net":
+            amount += " на руки"
+        elif stype == "gross":
+            amount += " до налог."
+        return amount
+
+    @staticmethod
+    def _row_updated(row: Any) -> str | None:
+        """Last time the listing was seen in a scrape, as a short date."""
+        dt = getattr(row, "last_seen_at", None)
+        try:
+            return dt.strftime("%d.%m.%Y") if dt is not None else None
+        except Exception:
+            return None
 
     @staticmethod
     def _extract_args(text: str) -> str:
@@ -340,6 +399,7 @@ class TelegramBotService:
         return {
             "query": None,
             "location": None,
+            "company": None,
             "date_days": None,
             "salary_from": None,
             "salary_to": None,
@@ -398,13 +458,16 @@ class TelegramBotService:
                     InlineKeyboardButton(text="📍 Локация", callback_data="ctx:set:location"),
                 ],
                 [
+                    InlineKeyboardButton(text="🏢 Компания", callback_data="ctx:set:company"),
                     InlineKeyboardButton(
                         text=cls._date_label(date_days), callback_data="ctx:set:date"
                     ),
-                    InlineKeyboardButton(text="💰 Зарплата", callback_data="ctx:set:salary"),
                 ],
                 [
+                    InlineKeyboardButton(text="💰 Зарплата", callback_data="ctx:set:salary"),
                     InlineKeyboardButton(text="🔎 Найти", callback_data="ctx:run"),
+                ],
+                [
                     InlineKeyboardButton(
                         text=f"⚡ Автопоиск: {'вкл' if auto_search else 'выкл'}",
                         callback_data="ctx:auto",
@@ -438,6 +501,7 @@ class TelegramBotService:
             TelegramMessages.context_summary(
                 query=ctx["query"],
                 location=ctx["location"],
+                company=ctx["company"],
                 salary_from=ctx["salary_from"],
                 salary_to=ctx["salary_to"],
                 date_days=ctx["date_days"],
@@ -481,6 +545,7 @@ class TelegramBotService:
                 limit=settings.telegram_search_limit,
                 is_admin=is_admin,
                 location=ctx["location"],
+                company=ctx["company"],
                 published_from=published_from,
                 salary_from=ctx["salary_from"],
                 salary_to=ctx["salary_to"],
@@ -600,9 +665,11 @@ class TelegramBotService:
             self._pending_inline_queries[token] = query_raw
             card = self._format_vacancy_card_md(
                 title=getattr(row, "title", "") or "Untitled",
-                company=getattr(row, "company_name", "") or "Unknown company",
+                company=self._row_company(row),
                 location=self._row_location(row),
                 url=getattr(row, "url", ""),
+                salary=self._row_salary(row),
+                updated=self._row_updated(row),
             )
             url = getattr(row, "url", "")
             keyboard = InlineKeyboardMarkup(
@@ -854,6 +921,9 @@ class TelegramBotService:
             if not await self._is_admin(message):
                 await self._send_text(message.chat.id, TelegramMessages.ADMIN_ONLY)
                 return
+            # Same daily health report the scheduler pushes — on demand.
+            report, _ = await build_daily_report()
+            await self._send_text(message.chat.id, report, markdown=False)
             notify = get_last_notification_stats()
             metrics = metrics_registry.snapshot()
             lines = [
@@ -958,6 +1028,47 @@ class TelegramBotService:
                         if 0 <= idx < len(choices):
                             ctx["history"].append(("location", ctx["location"]))
                             ctx["location"] = choices[idx]
+                            await self._open_context_menu(callback.message, user_id=user_id)
+                            if ctx["auto_search"]:
+                                await self._run_context_search(
+                                    callback.message, user=callback.from_user
+                                )
+                    await callback.answer()
+                    return
+                if data == "ctx:set:company":
+                    async with get_session() as session:
+                        repo = VacancySearchRepository(session)
+                        choices = await repo.list_top_companies(limit=8)
+                    self._context_company_choices[user_id] = choices
+                    company_rows: list[list[InlineKeyboardButton]] = [
+                        [InlineKeyboardButton(text=name[:50], callback_data=f"ctx:comp:{idx}")]
+                        for idx, name in enumerate(choices)
+                    ]
+                    company_rows.append(
+                        [InlineKeyboardButton(text="✍️ Другое", callback_data="ctx:comp:custom")]
+                    )
+                    await self._send_text(
+                        callback.message.chat.id,
+                        "Выберите компанию:",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=company_rows),
+                    )
+                    await callback.answer()
+                    return
+                if data.startswith("ctx:comp:"):
+                    suffix = data.split(":", 2)[2]
+                    if suffix == "custom":
+                        self._pending_user_action[user_id] = "ctx_company_custom"
+                        await self._send_text(
+                            callback.message.chat.id, TelegramMessages.ASK_CONTEXT_COMPANY_CUSTOM
+                        )
+                        await callback.answer()
+                        return
+                    if suffix.isdigit():
+                        idx = int(suffix)
+                        choices = self._context_company_choices.get(user_id, [])
+                        if 0 <= idx < len(choices):
+                            ctx["history"].append(("company", ctx["company"]))
+                            ctx["company"] = choices[idx]
                             await self._open_context_menu(callback.message, user_id=user_id)
                             if ctx["auto_search"]:
                                 await self._run_context_search(
@@ -1294,6 +1405,13 @@ class TelegramBotService:
                 ctx = self._get_context(message.from_user.id)
                 ctx["history"].append(("location", ctx["location"]))
                 ctx["location"] = message.text.strip()
+                await self._open_context_menu(message)
+                if ctx["auto_search"]:
+                    await self._run_context_search(message)
+            elif action == "ctx_company_custom":
+                ctx = self._get_context(message.from_user.id)
+                ctx["history"].append(("company", ctx["company"]))
+                ctx["company"] = message.text.strip()
                 await self._open_context_menu(message)
                 if ctx["auto_search"]:
                     await self._run_context_search(message)

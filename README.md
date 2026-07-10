@@ -108,6 +108,7 @@ poetry run python -m src.main scheduler         # run the scheduler
 | `bot`                                        | Run the Telegram bot (long-polling)                                            |
 | `migrate`                                    | Create tables from ORM metadata (dev; prefer Alembic in prod)                  |
 | `backfill-cities`                            | Resolve every vacancy's raw location into the `cities` dictionary (idempotent) |
+| `backfill-company-groups`                    | Group companies into canonical `company_groups` (idempotent)                   |
 | `daily-report`                               | Build and send the daily admin health report now                               |
 
 
@@ -156,7 +157,13 @@ tests/                          # pytest (async, sqlite in-memory)
 - **Vacancy** — scraped listing. Keeps the raw `location` string plus a FK to a
 normalized `city`; `display_location` prefers the city's translation.
 - **Company** — deduped per `(source, external_id)` (synthetic id from name when
-the site has none).
+the site has none). Linked to a canonical **CompanyGroup**.
+- **CompanyGroup** — canonical company across sources. Per-source `Company` rows
+resolve to one group by a normalized name key (strips legal forms/quotes/case/
+diacritics), so "UAB „Biuro“" / "Biuro, UAB" from different boards unify. See
+[company_normalizer.py](src/services/company_normalizer.py); grouping is
+automatic but correctable in the admin. `Vacancy.display_company` shows the
+canonical group name.
 - **City** — canonical `name_en` (always set) + optional `name_translated` (RU).
 See [city_normalizer.py](src/services/city_normalizer.py); different
 spellings resolve to one row (diacritic- and case-insensitive).
@@ -188,6 +195,20 @@ Backfill existing rows once:
 python -m src.main backfill-cities
 ```
 
+## Company Unification
+
+Per-source `Company` rows are grouped into a canonical **CompanyGroup** by a
+normalized name key (`company_normalizer.normalize_company_name`: casefold +
+deaccent, strips legal forms UAB/AB/MB/SIA/OÜ/filialas/ООО…). Resolved on upsert;
+`display_company` and the bot's company search/filter use the group, so the same
+company appears once across boards and search is case/diacritic-insensitive.
+
+Backfill existing rows once:
+
+```bash
+python -m src.main backfill-company-groups
+```
+
 
 
 ## Change Tracking
@@ -210,8 +231,15 @@ SELECT * FROM v_latest_scrape_runs;
 
 - Full-text search over original text **and** RU translation
 (`include`, `-exclude`, `~fuzzy`, and admin-only `regex`).
-- Context filters: location (normalized), date, salary range.
-- Subscriptions with de-duplicated delivery of new matches.
+- Context filters (🧩 Фильтры): query, location (normalized), **company**
+(top list or free text; case/diacritic-insensitive), date range
+(today / 3 / 7 / 14 / 30 days / any), salary range, auto-search.
+- Result cards show title, canonical company, location, **salary** (when
+present) and the listing's **last-updated date**, with "Открыть вакансию" and
+"Подписаться на этот запрос" buttons.
+- Subscriptions with de-duplicated delivery of new matches; "📋 Мои подписки"
+lists each with current-offers / unsubscribe buttons.
+- Full button reference is in `/help` (admin commands shown only to admins).
 - Admin: `/admin_stats` (delivery + metrics), `🛠 Админ` menu.
 
 
@@ -239,6 +267,16 @@ docker compose up -d admin
 docker compose exec admin python manage.py createsuperuser
 ```
 
+**Schedules** — the four scrapers plus translation/notification/report jobs have
+their cron expressions in the `schedules` table, editable in the admin. The
+scheduler seeds it from `.env` on first start, then reloads once a minute:
+changed crons reschedule live, jobs enable/disable, and the **Run now** action
+fires a job out of schedule — all without restarting the `scraper` container.
+
+**In production the admin is hardened** (see [Secure remote deploy](#secure-remote-deploy-single-vps)):
+it lives under a secret URL path (`DJANGO_ADMIN_PATH`), not `/admin`, and sits
+behind Caddy HTTP Basic Auth on top of the Django login.
+
 
 
 ## Configuration (`.env`)
@@ -257,8 +295,10 @@ SCHEDULE_TRANSLATIONS=*/15 * * * *
 SCHEDULE_SUBSCRIPTION_NOTIFICATIONS=*/10 * * * *
 SCHEDULE_DAILY_REPORT=0 9 * * *
 
-# DeepL
-DEEPL_API_KEY=...
+# DeepL — one or more keys, comma-separated. The client rotates on quota
+# (HTTP 456); translations stop only when ALL keys are spent, at which point
+# the `translations` schedule is auto-disabled and the daily report warns.
+DEEPL_API_KEY=key1:fx,key2:fx
 DEEPL_TARGET_LANG=RU
 
 # Telegram
@@ -272,6 +312,12 @@ DAILY_REPORT_STALE_HOURS=24
 DJANGO_SECRET_KEY=change-me
 DJANGO_DEBUG=false
 DJANGO_ALLOWED_HOSTS=*
+
+# Production-only (docker-compose.prod.yml + Caddy)
+ADMIN_DOMAIN=joblt.example.com        # domain Caddy issues a TLS cert for
+DJANGO_ADMIN_PATH=some-secret-path    # admin URL instead of /admin
+ADMIN_BASIC_USER=admin                # Caddy Basic Auth user
+ADMIN_BASIC_HASH=$$2a$$14$$...        # bcrypt hash — double every $ to $$
 ```
 
 
@@ -342,6 +388,42 @@ docker compose restart scraper
 docker compose exec postgres pg_dump -U scraper -d job_scraper > backup.sql
 cat backup.sql | docker compose exec -T postgres psql -U scraper -d job_scraper
 ```
+
+### Secure remote deploy (single VPS)
+
+`docker-compose.prod.yml` targets a single VPS (e.g. Hetzner CX23): Postgres is
+not exposed, containers have memory limits and log rotation, and a **Caddy**
+service terminates TLS (auto Let's Encrypt for `ADMIN_DOMAIN`) in front of the
+admin. Two layers protect the admin:
+
+1. **Secret URL path** — `DJANGO_ADMIN_PATH` replaces `/admin`; `/admin` and `/`
+   return 404 with no redirect leaking the real path.
+2. **Caddy HTTP Basic Auth** — a second factor before the Django login. Generate
+   the hash with the `$` already doubled (compose would otherwise expand `$…` in
+   the hash and blank it):
+
+   ```bash
+   docker run --rm caddy:2-alpine caddy hash-password --plaintext 'пароль' | sed 's/\$/\$\$/g'
+   ```
+
+   Put `ADMIN_BASIC_USER` / `ADMIN_BASIC_HASH` in `.env` with every `$` in the
+   hash doubled to `$$` (e.g. `ADMIN_BASIC_HASH=$$2a$$14$$…`).
+
+All server ops run **from your machine** via `deploy/deploy-remote.sh` (config in
+`deploy/remote.conf.local`) — no server shell needed:
+
+```bash
+./deploy/deploy-remote.sh push              # rsync code + rebuild + migrate + restart
+./deploy/deploy-remote.sh migrate           # apply migrations
+./deploy/deploy-remote.sh createsuperuser   # interactive, over SSH
+./deploy/deploy-remote.sh changepassword <user>
+./deploy/deploy-remote.sh manage <cmd> …    # any manage.py command
+./deploy/deploy-remote.sh logs | status | backup | restore-db [file]
+```
+
+> Shell scripts and configs are pinned to LF via `.gitattributes` — a CRLF
+> checkout on Windows would otherwise break the shebang on the server
+> (`env: bash\r`).
 
 
 

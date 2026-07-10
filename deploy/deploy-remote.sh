@@ -4,13 +4,17 @@
 # Требуется: ssh, rsync (для push). На сервере: docker, docker compose.
 #
 # Использование (из корня проекта или из deploy/):
-#   ./deploy/deploy-remote.sh push     — синхронизировать код и перезапустить бота
+#   ./deploy/deploy-remote.sh push     — git push + git pull на сервере + пересборка
 #   ./deploy/deploy-remote.sh setup    — первый раз на сервере: создать каталог, .env, запустить
 #   ./deploy/deploy-remote.sh start    — запустить контейнер на сервере
 #   ./deploy/deploy-remote.sh stop     — остановить на сервере
 #   ./deploy/deploy-remote.sh logs     — логи с сервера
 #   ./deploy/deploy-remote.sh status   — статус на сервере
 #   ./deploy/deploy-remote.sh backup   — бэкап БД на сервере
+#   ./deploy/deploy-remote.sh migrate  — применить миграции на сервере
+#   ./deploy/deploy-remote.sh createsuperuser        — создать админа (интерактивно)
+#   ./deploy/deploy-remote.sh changepassword <user>  — сменить пароль админа
+#   ./deploy/deploy-remote.sh manage <cmd> [args...]  — любая manage.py-команда
 #   ./deploy/deploy-remote.sh ssh      — открыть SSH-сессию в REMOTE_DIR
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -43,28 +47,27 @@ SCP_OPTS=()
 
 REMOTE="${REMOTE_USER}@${REMOTE_HOST}"
 ssh_cmd() { ssh "${SSH_OPTS[@]}" "$REMOTE" "$@"; }
+# -t allocates a TTY for interactive remote commands (createsuperuser, shell).
+ssh_tty() { ssh -t "${SSH_OPTS[@]}" "$REMOTE" "$@"; }
 scp_from_remote() { scp "${SCP_OPTS[@]}" "$REMOTE:$1" "$2"; }
 scp_to_remote() { scp "${SCP_OPTS[@]}" "$1" "$REMOTE:$2"; }
+
+# Compose file used on the server (prod by default; override via remote.conf).
+COMPOSE_FILE_REMOTE="${COMPOSE_FILE:-docker-compose.prod.yml}"
+DC="docker compose -f $COMPOSE_FILE_REMOTE"
 
 cmd="${1:-help}"
 
 case "$cmd" in
   push)
-    info "Синхронизация кода на $REMOTE:$REMOTE_DIR ..."
-    rsync -avz --delete \
-      -e "ssh ${SSH_OPTS[*]}" \
-      --exclude='.git' \
-      --exclude='data' \
-      --exclude='.env' \
-      --exclude='backups' \
-      --exclude='__pycache__' \
-      --exclude='*.pyc' \
-      --exclude='.venv' \
-      --exclude='deploy/remote.conf.local' \
-      "$PROJECT_ROOT/" \
-      "$REMOTE:$REMOTE_DIR/"
-    info "Перезапуск сервисов на сервере (с автобэкапом перед миграциями)..."
-    ssh_cmd "cd $REMOTE_DIR && ./deploy/deploy-local.sh update"
+    # Git-based deploy: push the current branch to origin, then the server
+    # pulls it. (No rsync — mixing rsync with the server's `git pull` leaves the
+    # working tree dirty and blocks the merge.)
+    branch="$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD)"
+    info "Локальный git push: origin/$branch ..."
+    git -C "$PROJECT_ROOT" push origin "$branch"
+    info "Деплой на сервере (git pull + автобэкап + миграции + пересборка)..."
+    ssh_cmd "cd $REMOTE_DIR && git pull --ff-only origin $branch && ./deploy/deploy-local.sh update"
     info "Готово."
     ;;
   setup)
@@ -165,6 +168,25 @@ case "$cmd" in
     ssh_cmd "cd $REMOTE_DIR && ./deploy/deploy-local.sh restore-all ./backups/$remote_env ./backups/$remote_db"
     info "Полное восстановление завершено."
     ;;
+  migrate)
+    info "Применяю миграции на сервере..."
+    ssh_cmd "cd $REMOTE_DIR && $DC run --rm migrate"
+    info "Миграции применены."
+    ;;
+  createsuperuser)
+    info "Создание суперпользователя (интерактивно)..."
+    ssh_tty "cd $REMOTE_DIR && $DC exec admin python manage.py createsuperuser"
+    ;;
+  changepassword)
+    user="${2:-}"
+    [ -n "$user" ] || err "Использование: changepassword <username>"
+    ssh_tty "cd $REMOTE_DIR && $DC exec admin python manage.py changepassword '$user'"
+    ;;
+  manage)
+    shift
+    [ $# -ge 1 ] || err "Использование: manage <django-команда> [аргументы]"
+    ssh_tty "cd $REMOTE_DIR && $DC exec admin python manage.py $*"
+    ;;
   ssh)
     ssh_cmd "cd $REMOTE_DIR && exec \$SHELL"
     ;;
@@ -183,6 +205,10 @@ case "$cmd" in
     echo "  restore-db [file]   — восстановить БД на сервере из локального бэкапа"
     echo "  restore-env [file]  — восстановить .env на сервере из локального бэкапа"
     echo "  restore-all [db] [env] — восстановить БД и .env на сервере"
+    echo "  migrate — применить миграции на сервере"
+    echo "  createsuperuser        — создать админа (интерактивно)"
+    echo "  changepassword <user>  — сменить пароль админа"
+    echo "  manage <cmd> [args...]  — любая manage.py-команда на сервере"
     echo "  ssh     — войти по SSH в каталог проекта на сервере"
     echo ""
     ;;

@@ -1,0 +1,176 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Production compose — предназначен для одиночного VPS (напр. Hetzner CX22:
+# 2 vCPU / 4 ГБ RAM / 40 ГБ SSD).
+#
+# Отличия от dev docker-compose.yml:
+#   • Postgres НЕ пробрасывает порт наружу — доступен только внутри сети compose.
+#   • Admin слушает только 127.0.0.1 — доступ через SSH-туннель, без TLS наружу.
+#   • Заданы memory-лимиты под 4 ГБ RAM (сумма ~2.8 ГБ + shm, остальное ОС/докер).
+#   • Ротация docker-логов (json-file, max-size/max-file) на всех сервисах.
+#   • DATABASE_URL собирается из POSTGRES_* — единый источник истины для пароля.
+#
+# Запуск на сервере:
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# В .env на сервере ОБЯЗАТЕЛЬНО задать (остальное — как обычно):
+#   POSTGRES_PASSWORD=<надёжный-пароль>
+#   POSTGRES_USER=scraper           # опционально, дефолт scraper
+#   POSTGRES_DB=job_scraper         # опционально, дефолт job_scraper
+#   DJANGO_SECRET_KEY=<случайный-ключ>
+# Старый DATABASE_URL=...@localhost в .env можно оставить — здесь он
+# перекрывается собранным из POSTGRES_* (хост postgres).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Общие настройки ротации docker-логов (json-file), подключаются через <<: *logging
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+# Единый DSN для всех сервисов приложения (asyncpg; Django сам заменит драйвер).
+x-database-url: &database_url
+  DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-scraper}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-job_scraper}"
+
+services:
+  # ── PostgreSQL ────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: job_scraper_db
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-job_scraper}
+      POSTGRES_USER: ${POSTGRES_USER:-scraper}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    # НЕТ ports: — БД доступна только сервисам внутри сети compose.
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-scraper} -d ${POSTGRES_DB:-job_scraper}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ── Migrations (run once, then exit) ──────────────────────────────────
+  migrate:
+    build: .
+    container_name: job_scraper_migrate
+    command: ["sh", "-c", "alembic upgrade head"]
+    logging: *logging
+    environment:
+      <<: *database_url
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # ── Scraper scheduler (Playwright/Chromium — главный потребитель RAM) ──
+  scraper:
+    build: .
+    container_name: job_scraper_app
+    restart: unless-stopped
+    logging: *logging
+    command: ["python", "-m", "src.main", "scheduler"]
+    env_file: .env
+    environment:
+      <<: *database_url
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/logs
+    shm_size: "512m"  # Chromium использует /dev/shm; без этого возможны падения
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: "2.0"
+
+  # ── Telegram bot (24/7, лёгкий) ───────────────────────────────────────
+  bot:
+    build: .
+    container_name: job_scraper_bot
+    restart: unless-stopped
+    logging: *logging
+    command: ["python", "-m", "src.main", "bot"]
+    env_file: .env
+    environment:
+      <<: *database_url
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/logs
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+  # ── Django admin panel (за Caddy — порт наружу не выставлен) ───────────
+  admin:
+    build:
+      context: .
+      dockerfile: Dockerfile.django
+    container_name: job_scraper_admin
+    restart: unless-stopped
+    logging: *logging
+    env_file: .env
+    environment:
+      <<: *database_url
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
+      DJANGO_DEBUG: "false"
+      DJANGO_ALLOWED_HOSTS: "${ADMIN_DOMAIN:?set ADMIN_DOMAIN in .env},localhost,127.0.0.1"
+      DJANGO_CSRF_TRUSTED_ORIGINS: "https://${ADMIN_DOMAIN}"
+      DJANGO_SECURE_COOKIES: "true"
+      DJANGO_ADMIN_PATH: ${DJANGO_ADMIN_PATH:?set DJANGO_ADMIN_PATH in .env}
+    # Порт наружу НЕ пробрасывается — доступ только через Caddy (admin:8000
+    # внутри сети compose). collectstatic пишет в общий volume static_files.
+    volumes:
+      - static_files:/app/staticfiles
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+  # ── Caddy: TLS-терминация + reverse-proxy на админку ──────────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: job_scraper_caddy
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      ADMIN_DOMAIN: ${ADMIN_DOMAIN:?set ADMIN_DOMAIN in .env}
+      ADMIN_BASIC_USER: ${ADMIN_BASIC_USER:?set ADMIN_BASIC_USER in .env}
+      # bcrypt hash — in .env every '$' MUST be doubled to '$$' so compose does
+      # not try to expand it as a variable (that blanks the hash). Compose turns
+      # '$$' back into a single '$' before passing it to the container.
+      ADMIN_BASIC_HASH: ${ADMIN_BASIC_HASH:?set ADMIN_BASIC_HASH in .env}
+    ports:
+      - "80:80"     # нужен для ACME HTTP-01 challenge и редиректа на https
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - static_files:/srv/static:ro   # раздаёт /static/* админки
+      - caddy_data:/data              # сертификаты Let's Encrypt (персистентно!)
+      - caddy_config:/config
+    depends_on:
+      - admin
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+volumes:
+  postgres_data:
+  static_files:
+  caddy_data:
+  caddy_config:

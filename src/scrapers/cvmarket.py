@@ -32,7 +32,7 @@ class CVMarketScraper(BaseScraper):
                 url = f"{BASE_URL}?start={start}"
                 log.info("cvmarket.fetch_page", start=start, url=url)
 
-                await page.goto(url, wait_until="domcontentloaded")
+                await self.safe_goto(page, url)
                 await page.wait_for_selector(
                     "//section[@data-component='jobs_list']",
                     timeout=15_000,
@@ -84,14 +84,15 @@ class CVMarketScraper(BaseScraper):
             return None
         href = await link_el.get_attribute("href") or ""
 
-        # Rich metadata from the article's data-event JSON
+        # Rich metadata from the article's data-event JSON. NOTE: cvmarket's
+        # data-event is frequently shifted to a NEIGHBOURING card — its item_id
+        # then belongs to another job — so it is trusted only when item_id
+        # matches this card's id (event_ok below).
         data_event = await item.get_attribute("data-event") or ""
         event_item = self._extract_event_item(data_event)
 
-        # External ID: prefer the explicit jobid attribute, then event data, then href
+        # External ID from the explicit jobid attribute, else parsed from href.
         external_id = await item.get_attribute("data-component-jobid") or ""
-        if not external_id and event_item.get("item_id"):
-            external_id = str(event_item["item_id"])
         if not external_id:
             id_match = re.search(r"-(\d+)(?:\?|$)", href) or re.search(r"/(\d+)/?$", href)
             external_id = id_match.group(1) if id_match else href
@@ -99,21 +100,32 @@ class CVMarketScraper(BaseScraper):
             log.warning("cvmarket.parser", error=f"External ID for {href} is not found")
             return None
 
+        # data-event describes THIS card only when its item_id matches.
+        event_ok = str(event_item.get("item_id") or "") == str(external_id)
+
         # Title — visible heading, fallback to event item name
         title_el = await item.query_selector("div.main-info h2")
         title = (await title_el.inner_text()).strip() if title_el else None
+        if not title and event_ok:
+            title = event_item.get("item_name")
         if not title:
-            title = event_item.get("item_name") or "Unknown"
+            title = "Unknown"
 
         # Company — visible label, fallback to event "affiliation"
         company_el = await item.query_selector("span.job-company")
         company = (await company_el.inner_text()).strip() if company_el else None
-        if not company:
+        if not company and event_ok:
             company = event_item.get("affiliation")
 
-        # Location — cvmarket has no visible location node on the card; the city
-        # is only available in the data-event payload.
-        location = event_item.get("location_id")
+        # Location — read from the card DOM. The data-event location_id often
+        # belongs to a neighbouring job (see event_ok), which made the city
+        # flip-flop on every run; the per-card DOM value is stable.
+        location = None
+        loc_el = await item.query_selector("div.text-sm.lg\\:hidden")
+        if loc_el:
+            location = (await loc_el.inner_text()).strip() or None
+        if not location and event_ok:
+            location = event_item.get("location_id")
 
         # Salary
         salary_el = await item.query_selector("div.salary-block")
@@ -123,7 +135,7 @@ class CVMarketScraper(BaseScraper):
         url = href if href.startswith("http") else f"https://www.cvmarket.lt{href}"
 
         extra: dict[str, Any] = {"raw_salary": raw_salary}
-        if event_item:
+        if event_ok:
             extra.update(
                 {
                     "job_id": event_item.get("item_id"),

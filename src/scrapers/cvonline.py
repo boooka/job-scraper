@@ -32,7 +32,7 @@ class CVOnlineScraper(BaseScraper):
                 url = f"{BASE_URL}?limit={PAGE_SIZE}&offset={offset}"
                 log.info("cvonline.fetch_page", offset=offset, url=url)
 
-                await page.goto(url, wait_until="domcontentloaded")
+                await self.safe_goto(page, url)
                 try:
                     await page.wait_for_selector("ul.vacancies-list", timeout=15_000)
                 except PlaywrightTimeoutError:

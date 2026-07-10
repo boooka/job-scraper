@@ -1,0 +1,7 @@
+# Files executed or parsed on the Linux server must keep LF line endings even
+# when checked out / edited on Windows — a CRLF in a shebang breaks `env bash`.
+*.sh        text eol=lf
+Dockerfile* text eol=lf
+Caddyfile   text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf

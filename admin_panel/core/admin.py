@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import os
+import re
+
+from django import forms
 from django.contrib import admin, messages
+from django.db.models import Count, OuterRef, Q, Subquery
+from django.utils import timezone
 
 from core.models import (
     City,
     Company,
     CompanyGroup,
+    Schedule,
     ScrapeRun,
     TelegramSubscription,
     TelegramSubscriptionDelivery,
@@ -17,6 +24,10 @@ from core.models import (
     VacancyChange,
     VacancyTranslation,
 )
+
+_CRON_FIELD = re.compile(r"[A-Za-z0-9*/,\-]+")
+# Language whose translation is shown in the vacancy list (mirrors DEEPL_TARGET_LANG).
+_TARGET_LANG = os.environ.get("DEEPL_TARGET_LANG", "RU")
 
 
 class ReadOnlyAdminMixin:
@@ -59,11 +70,13 @@ class CityAdmin(admin.ModelAdmin):
     readonly_fields = ("created_at", "updated_at")
 
     def get_queryset(self, request):
-        from django.db.models import Count
+        return (
+            super()
+            .get_queryset(request)
+            .annotate(_vacancy_count=Count("vacancies", filter=Q(vacancies__is_active=True)))
+        )
 
-        return super().get_queryset(request).annotate(_vacancy_count=Count("vacancies"))
-
-    @admin.display(description="Vacancies", ordering="_vacancy_count")
+    @admin.display(description="Active vacancies", ordering="_vacancy_count")
     def vacancy_count(self, obj):
         return getattr(obj, "_vacancy_count", 0)
 
@@ -76,14 +89,16 @@ class CompanyGroupAdmin(admin.ModelAdmin):
     readonly_fields = ("normalized_key", "created_at", "updated_at")
 
     def get_queryset(self, request):
-        from django.db.models import Count
-
         return (
             super()
             .get_queryset(request)
             .annotate(
                 _company_count=Count("companies", distinct=True),
-                _vacancy_count=Count("companies__vacancies", distinct=True),
+                _vacancy_count=Count(
+                    "companies__vacancies",
+                    filter=Q(companies__vacancies__is_active=True),
+                    distinct=True,
+                ),
             )
         )
 
@@ -91,7 +106,7 @@ class CompanyGroupAdmin(admin.ModelAdmin):
     def company_count(self, obj):
         return getattr(obj, "_company_count", 0)
 
-    @admin.display(description="Vacancies", ordering="_vacancy_count")
+    @admin.display(description="Active vacancies", ordering="_vacancy_count")
     def vacancy_count(self, obj):
         return getattr(obj, "_vacancy_count", 0)
 
@@ -115,11 +130,13 @@ class CompanyAdmin(admin.ModelAdmin):
     actions = ("merge_into_one_group",)
 
     def get_queryset(self, request):
-        from django.db.models import Count
+        return (
+            super()
+            .get_queryset(request)
+            .annotate(_vacancy_count=Count("vacancies", filter=Q(vacancies__is_active=True)))
+        )
 
-        return super().get_queryset(request).annotate(_vacancy_count=Count("vacancies"))
-
-    @admin.display(description="Vacancies", ordering="_vacancy_count")
+    @admin.display(description="Active vacancies", ordering="_vacancy_count")
     def vacancy_count(self, obj):
         return getattr(obj, "_vacancy_count", 0)
 
@@ -139,10 +156,65 @@ class CompanyAdmin(admin.ModelAdmin):
         self.message_user(request, f"Перенесено компаний в одну группу: {updated}.")
 
 
+class RelatedAutocompleteFilter(admin.SimpleListFilter):
+    """Changelist filter rendered as a Select2 autocomplete input.
+
+    Instead of a static dropdown it shows a text box that queries the built-in
+    admin autocomplete endpoint (``admin:autocomplete``) after 2 typed chars,
+    suggesting live values from the DB via the related model's search_fields.
+    Subclasses set ``title`` / ``parameter_name`` / ``field_name`` and the
+    ``related_model`` used to render the label of the currently selected value.
+    """
+
+    template = "core/autocomplete_filter.html"
+    field_name = ""  # FK on Vacancy, e.g. "city" / "company"
+    related_model = None
+
+    def lookups(self, request, model_admin):
+        return ()
+
+    def has_output(self):
+        # No static choices, but we always want the input rendered.
+        return True
+
+    def queryset(self, request, queryset):
+        if self.value():
+            return queryset.filter(**{f"{self.field_name}__pk": self.value()})
+        return queryset
+
+    @property
+    def selected_value(self):
+        return self.value() or ""
+
+    @property
+    def selected_label(self):
+        """Human label for the active value, so Select2 shows it after reload."""
+        value = self.value()
+        if not value or self.related_model is None:
+            return ""
+        obj = self.related_model.objects.filter(pk=value).first()
+        return str(obj) if obj else value
+
+
+class CityAutocompleteFilter(RelatedAutocompleteFilter):
+    title = "city"
+    parameter_name = "city"
+    field_name = "city"
+    related_model = City
+
+
+class CompanyAutocompleteFilter(RelatedAutocompleteFilter):
+    title = "company"
+    parameter_name = "company"
+    field_name = "company"
+    related_model = Company
+
+
 @admin.register(Vacancy)
 class VacancyAdmin(admin.ModelAdmin):
     list_display = (
         "title",
+        "title_translated",
         "source",
         "company_name",
         "location",
@@ -154,12 +226,40 @@ class VacancyAdmin(admin.ModelAdmin):
         "welcome_ukraine",
         "last_seen_at",
     )
-    list_filter = ("source", "is_active", "welcome_ukraine", "salary_currency")
-    search_fields = ("title", "company_name", "external_id", "location")
-    raw_id_fields = ("company", "city")
+    list_filter = (
+        CityAutocompleteFilter,
+        CompanyAutocompleteFilter,
+        "source",
+        "is_active",
+        "welcome_ukraine",
+        "salary_currency",
+    )
+    # Search matches the original title and the translated title (via the
+    # reverse relation); Django adds DISTINCT automatically for the join.
+    search_fields = (
+        "title",
+        "translations__title_translated",
+        "company_name",
+        "external_id",
+        "location",
+    )
+    # autocomplete_fields (not raw_id) both gives Select2 on the change form and
+    # authorizes the admin:autocomplete endpoint to serve city/company here.
+    autocomplete_fields = ("company", "city")
     list_select_related = ("company", "city")
     readonly_fields = ("id", "first_seen_at", "last_seen_at")
     inlines = (VacancyTranslationInline, VacancyChangeInline)
+
+    def get_queryset(self, request):
+        # Pull the target-language title in one query (avoids N+1 over translations).
+        translated = VacancyTranslation.objects.filter(
+            vacancy_id=OuterRef("pk"), language=_TARGET_LANG
+        ).values("title_translated")[:1]
+        return super().get_queryset(request).annotate(_title_translated=Subquery(translated))
+
+    @admin.display(description="Название (перевод)", ordering="_title_translated")
+    def title_translated(self, obj):
+        return obj._title_translated or "—"
 
 
 @admin.register(VacancyTranslation)
@@ -231,3 +331,52 @@ class TelegramSubscriptionDeliveryAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
     list_display = ("subscription", "vacancy", "sent_at")
     search_fields = ("subscription__telegram_user_id", "vacancy__title")
     ordering = ("-sent_at",)
+
+
+class ScheduleForm(forms.ModelForm):
+    class Meta:
+        model = Schedule
+        fields = ("cron", "enabled")
+
+    def clean_cron(self) -> str:
+        expr = (self.cleaned_data.get("cron") or "").strip()
+        parts = expr.split()
+        if len(parts) != 5:
+            raise forms.ValidationError(
+                "Cron должен содержать ровно 5 полей: минута час день месяц день_недели."
+            )
+        if not all(_CRON_FIELD.fullmatch(p) for p in parts):
+            raise forms.ValidationError(
+                "Недопустимые символы. Разрешены цифры и символы * / , - "
+                "(и имена дней/месяцев, напр. mon-fri)."
+            )
+        return expr
+
+
+@admin.register(Schedule)
+class ScheduleAdmin(admin.ModelAdmin):
+    form = ScheduleForm
+    list_display = ("job_id", "name", "cron", "enabled", "run_now_requested_at", "updated_at")
+    list_display_links = ("job_id",)
+    list_editable = ("cron", "enabled")
+    ordering = ("job_id",)
+    readonly_fields = ("job_id", "name", "run_now_requested_at", "created_at", "updated_at")
+    actions = ("run_now",)
+
+    # Rows are owned by the scheduler's JOB_REGISTRY — seeded on startup. Adding
+    # or deleting rows by hand would desync from the code, so both are disabled.
+    def has_add_permission(self, request) -> bool:
+        return False
+
+    def has_delete_permission(self, request, obj=None) -> bool:
+        return False
+
+    @admin.action(description="▶ Запустить сейчас")
+    def run_now(self, request, queryset) -> None:
+        updated = queryset.update(run_now_requested_at=timezone.now())
+        self.message_user(
+            request,
+            f"Запрошен внеплановый запуск задач: {updated}. "
+            "Scheduler подхватит в течение минуты.",
+            messages.SUCCESS,
+        )

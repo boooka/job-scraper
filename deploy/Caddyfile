@@ -1,0 +1,30 @@
+# Reverse-proxy с автоматическим TLS (Let's Encrypt) перед Django-админкой.
+# Домен берётся из переменной окружения ADMIN_DOMAIN (задаётся в .env).
+# Caddy сам получает и продлевает сертификат на портах 80/443.
+
+{$ADMIN_DOMAIN} {
+	encode zstd gzip
+
+	# HTTP Basic Auth перед всем сайтом — второй фактор поверх Django-логина.
+	# Пользователь и bcrypt-хеш берутся из окружения (см. .env; в .env каждый '$'
+	# в хеше удваивается до '$$', сюда Caddy получает уже нормальный хеш).
+	basic_auth {
+		{$ADMIN_BASIC_USER} {$ADMIN_BASIC_HASH}
+	}
+
+	# Статику админки (collectstatic → /app/staticfiles, общий volume) отдаёт
+	# сам Caddy — при DEBUG=false Django/gunicorn её не обслуживают.
+	handle_path /static/* {
+		root * /srv/static
+		file_server
+	}
+
+	# Всё остальное — в gunicorn. Caddy автоматически проставляет
+	# X-Forwarded-Proto: https и X-Forwarded-For (их читает Django).
+	reverse_proxy admin:8000
+
+	log {
+		output stdout
+		format console
+	}
+}

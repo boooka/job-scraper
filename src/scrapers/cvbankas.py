@@ -28,7 +28,7 @@ class CVBankasScraper(BaseScraper):
                 url = BASE_URL if page_num == 1 else f"{BASE_URL}?page={page_num}"
                 log.info("cvbankas.fetch_page", page=page_num, url=url)
 
-                await page.goto(url, wait_until="domcontentloaded")
+                await self.safe_goto(page, url)
                 await page.wait_for_selector(
                     "div#js_id_id_job_ad_list article.list_article", timeout=15_000
                 )
