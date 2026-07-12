@@ -32,9 +32,7 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 # else "403 CSRF verification failed". Set DJANGO_CSRF_TRUSTED_ORIGINS to
 # "https://your-domain" (comma-separated for several).
 CSRF_TRUSTED_ORIGINS = [
-    o.strip()
-    for o in os.environ.get("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",")
-    if o.strip()
+    o.strip() for o in os.environ.get("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",") if o.strip()
 ]
 # Send session/CSRF cookies only over HTTPS. Enable in prod (behind Caddy);
 # leave off for plain-http local/tunnel access.
